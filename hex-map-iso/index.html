@@ -492,6 +492,7 @@ function newGame(seed) {
     ],
     currentPlayer: 0,
     turn: 1,
+    nextUnitSeq: 0,
     phase: 'play', // 'play' | 'pass' | 'won'
     winner: null,
     selected: null, // { kind: 'unit'|'village', q, r }
@@ -510,8 +511,11 @@ function trainUnit(state, village, type) {
   if (state.unitAt(village.q, village.r)) return false;
   if (player.stars < stats.cost) return false;
   player.stars -= stats.cost;
+  // Deterministic unit ID: turn-player-sequence. No Math.random in rules code
+  // per doc 18 §4 / §8 — IDs must replay identically across clients & server.
+  const id = `u-${state.turn}-${state.currentPlayer}-${state.nextUnitSeq++}`;
   state.units.push({
-    id: Math.random().toString(36).slice(2, 9),
+    id,
     q: village.q,
     r: village.r,
     type,
