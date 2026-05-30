@@ -606,13 +606,18 @@ function startTurn(state) {
 }
 
 function endTurn(state) {
-  // Capture: if a unit is standing on an opposing village, capture it.
+  // Capture: any active-player unit standing on a non-self village captures it.
+  // Restricted to the active player's units only (matches server).
+  // Neutral capture (prev owner null) pays a +5★ lump sum per GDD §2.2.
   for (const u of state.units) {
+    if (u.player !== state.currentPlayer) continue;
     const v = state.villageAt(u.q, u.r);
-    if (v && v.ownerPlayer !== null && v.ownerPlayer !== u.player) {
-      v.ownerPlayer = u.player;
-    } else if (v && v.ownerPlayer === null) {
-      v.ownerPlayer = u.player;
+    if (!v) continue;
+    if (v.ownerPlayer === state.currentPlayer) continue;
+    const prev = v.ownerPlayer;
+    v.ownerPlayer = state.currentPlayer;
+    if (prev === null) {
+      state.players[state.currentPlayer].stars += 5;
     }
   }
   // Healing per GDD §2.6: each active-player unit that did NOT move AND
