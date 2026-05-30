@@ -171,6 +171,7 @@
     <div class="pill" id="turnPill">P1 · 5★ · Turn 1</div>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
     <button class="pill" id="newGameBtn">New</button>
+    <div class="pill muted" id="modePill" title="Network mode">offline</div>
   </div>
 
   <div id="bottomBar">
@@ -251,8 +252,10 @@ const TILE = {
 };
 
 const UNIT_STATS = {
-  warrior: { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Warrior' },
-  rider:   { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Rider'   },
+  warrior:  { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Warrior'  },
+  rider:    { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Rider'    },
+  archer:   { hp: 10, atk: 2, def: 1, move: 1, range: 2, cost: 3, dash: false, label: 'Archer'   },
+  defender: { hp: 15, atk: 1, def: 3, move: 1, range: 1, cost: 3, dash: false, label: 'Defender' },
 };
 
 const PLAYER_COLORS = {
@@ -613,6 +616,298 @@ function endTurn(state) {
   if (state.currentPlayer === 0) state.turn += 1;
   state.phase = 'pass';
   state.selected = null;
+}
+
+// ============================================================
+// NETWORK ADAPTER (online mode)
+// ------------------------------------------------------------
+// Offline mode (default) is the existing behavior — pure-local state,
+// mutators run synchronously, pass-and-play UX.
+//
+// Online mode activates when:
+//   - URL has ?server=<base-url>  (e.g. ?server=https://tbs-server.fly.dev)
+//   - The "online" toggle is flipped on (writes ?server to URL + reloads)
+//
+// Wire protocol per server/src/api/server.ts:
+//   POST /games                   → { gameId, seed, rulesVersion }
+//   GET  /games/:id/state?player=N → { view, hash, currentPlayer, turn, phase, winner }
+//   POST /games/:id/intents       → { events, hash, currentPlayer, turn, phase, winner }
+//
+// Server is authoritative. The client posts an intent, waits for the
+// response, then re-fetches the fog-filtered state and re-renders.
+// No optimistic application — server is the source of truth.
+//
+// Local player is fixed to player 0 in this prototype (single-tab demo).
+// Pass-and-play does NOT apply in online mode (each device is one player).
+// ============================================================
+
+const NET = {
+  enabled: false,
+  baseUrl: null,
+  gameId: null,
+  myPlayer: 0,
+  // Track last server header so the UI can detect "not my turn"
+  serverTurn: 1,
+  serverCurrentPlayer: 0,
+  serverPhase: 'play',
+  serverWinner: null,
+  inFlight: false,
+};
+
+function readNetConfigFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const server = params.get('server');
+    if (!server) return { enabled: false };
+    // Strip trailing slash
+    const base = server.replace(/\/+$/, '');
+    const gameId = params.get('game') || null;
+    const player = parseInt(params.get('player') || '0', 10);
+    return {
+      enabled: true,
+      baseUrl: base,
+      gameId,
+      myPlayer: Number.isInteger(player) && (player === 0 || player === 1) ? player : 0,
+    };
+  } catch {
+    return { enabled: false };
+  }
+}
+
+async function fetchJson(url, opts) {
+  const res = await fetch(url, opts);
+  const text = await res.text();
+  let body = null;
+  try { body = text ? JSON.parse(text) : null; } catch { body = { raw: text }; }
+  if (!res.ok) {
+    const reason = body && body.reason ? body.reason : (body && body.error ? body.error : `HTTP ${res.status}`);
+    const err = new Error(`Request failed: ${reason}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  return body;
+}
+
+async function netCreateGame(seed) {
+  const url = `${NET.baseUrl}/games`;
+  const body = JSON.stringify(seed !== undefined ? { seed } : {});
+  return fetchJson(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body,
+  });
+}
+
+async function netFetchState() {
+  const url = `${NET.baseUrl}/games/${NET.gameId}/state?player=${NET.myPlayer}`;
+  return fetchJson(url, { method: 'GET' });
+}
+
+async function netSubmitIntent(intent) {
+  const url = `${NET.baseUrl}/games/${NET.gameId}/intents`;
+  return fetchJson(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(intent),
+  });
+}
+
+// Server tile.type is a string ('water'|'plains'|'trees'|'mountain').
+// Prototype renderer expects tile.type to be one of TILE.* objects (with
+// .passable and .defenseBonus). Normalize one side to the other so the
+// renderer is mode-agnostic.
+const SERVER_TILE_TYPE_TO_OBJ = {
+  water: TILE.WATER,
+  plains: TILE.PLAINS,
+  trees: TILE.TREES,
+  mountain: TILE.MOUNTAIN,
+};
+
+// Convert a server "view" payload into the prototype's in-memory game shape.
+// The view already has fog applied — we don't filter further here.
+function adoptServerView(view, header) {
+  const tiles = view.map.tiles.map(t => {
+    const typeObj = SERVER_TILE_TYPE_TO_OBJ[t.type];
+    if (!typeObj) throw new Error(`Unknown server tile type: ${t.type}`);
+    return {
+      q: t.q,
+      r: t.r,
+      type: typeObj,
+      hasVillage: !!t.hasVillage,
+      ownerPlayer: t.ownerPlayer,
+      isCapital: !!t.isCapital,
+    };
+  });
+  const state = {
+    map: { radius: view.map.radius, tiles, seed: view.map.seed },
+    units: view.units.map(u => ({ ...u })),
+    players: view.players.map(p => ({ ...p })),
+    currentPlayer: view.currentPlayer,
+    turn: view.turn,
+    nextUnitSeq: view.nextUnitSeq,
+    // Server only knows 'play' | 'won'. The 'pass' overlay is a pass-and-play
+    // device-handoff thing that doesn't exist online (each device is one player).
+    phase: header.phase === 'won' ? 'won' : 'play',
+    winner: header.winner,
+    selected: null,
+    tileAt(q, r) { return this.map.tiles.find(t => t.q === q && t.r === r); },
+    unitAt(q, r) { return this.units.find(u => u.q === q && u.r === r); },
+    villageAt(q, r) { const t = this.tileAt(q, r); return t && t.hasVillage ? t : null; },
+    ownedVillages(playerId) { return this.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId); },
+  };
+  // Recompute can-act flags client-side for UI affordances (visual only;
+  // server still authoritatively validates each intent). The server's
+  // GameState already carries canMove/canAttack — preserve them as-is.
+  return state;
+}
+
+// Refresh from server, rebuild `game`, redraw, and update UI.
+async function netRefreshAndRender() {
+  const resp = await netFetchState();
+  NET.serverTurn = resp.turn;
+  NET.serverCurrentPlayer = resp.currentPlayer;
+  NET.serverPhase = resp.phase;
+  NET.serverWinner = resp.winner;
+  const next = adoptServerView(resp.view, {
+    phase: resp.phase,
+    winner: resp.winner,
+  });
+  // Preserve user's current tile selection if still valid.
+  if (game && game.selected) {
+    const t = next.tileAt(game.selected.q, game.selected.r);
+    if (t) next.selected = { ...game.selected };
+  }
+  game = next;
+  updateAll();
+  if (resp.phase === 'won') {
+    showWin();
+  }
+}
+
+function isMyTurn() {
+  if (!NET.enabled) return true;
+  return NET.serverCurrentPlayer === NET.myPlayer && NET.serverPhase === 'play';
+}
+
+// ---- Client-side action wrappers (used by handlers) ----
+// Offline: call existing local mutators synchronously.
+// Online:  POST intent, then refetch state. Server is authoritative.
+
+async function clientTrainUnit(village, unitType) {
+  if (!NET.enabled) {
+    if (trainUnit(game, village, unitType)) updateAll();
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'TrainUnit',
+      village: { q: village.q, r: village.r },
+      unitType,
+    });
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('TrainUnit failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientMoveUnit(unit, toQ, toR) {
+  if (!NET.enabled) {
+    return moveUnit(game, unit, toQ, toR);
+  }
+  if (!isMyTurn() || NET.inFlight) return false;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'MoveUnit',
+      unitId: unit.id,
+      to: { q: toQ, r: toR },
+    });
+    await netRefreshAndRender();
+    return true;
+  } catch (err) {
+    console.warn('MoveUnit failed:', err);
+    return false;
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientAttackUnit(attacker, defender) {
+  if (!NET.enabled) {
+    return attackUnit(game, attacker, defender);
+  }
+  if (!isMyTurn() || NET.inFlight) return null;
+  NET.inFlight = true;
+  try {
+    const resp = await netSubmitIntent({
+      kind: 'Attack',
+      attackerId: attacker.id,
+      defenderId: defender.id,
+    });
+    await netRefreshAndRender();
+    // Map server's AttackResolved event to the prototype's toast shape.
+    const ev = (resp.events || []).find(e => e.kind === 'AttackResolved');
+    if (ev) {
+      return [{
+        attackerType: attacker.type,
+        defenderType: defender.type,
+        defenderDamage: ev.data.defenderDamage,
+        attackerDamage: ev.data.attackerDamage,
+        defenderKilled: (resp.events || []).some(e => e.kind === 'UnitKilled' && e.data.unitId === defender.id),
+        attackerKilled: (resp.events || []).some(e => e.kind === 'UnitKilled' && e.data.unitId === attacker.id),
+      }];
+    }
+    return [];
+  } catch (err) {
+    console.warn('Attack failed:', err);
+    return null;
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientEndTurn() {
+  if (!NET.enabled) {
+    endTurn(game);
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({ kind: 'EndTurn' });
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('EndTurn failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientStartNewGame(seed) {
+  if (!NET.enabled) {
+    // Caller (startNewGame) handles local reset.
+    return;
+  }
+  NET.inFlight = true;
+  try {
+    const created = await netCreateGame(seed);
+    NET.gameId = created.gameId;
+    // Reflect gameId in the URL so reload preserves the session.
+    try {
+      const u = new URL(window.location.href);
+      u.searchParams.set('game', created.gameId);
+      u.searchParams.set('player', String(NET.myPlayer));
+      window.history.replaceState({}, '', u.toString());
+    } catch { /* noop */ }
+    await netRefreshAndRender();
+  } finally {
+    NET.inFlight = false;
+  }
 }
 
 // ============================================================
@@ -1061,6 +1356,8 @@ canvas.addEventListener('wheel', wheel, { passive: false });
 // ============================================================
 function handleTap(sx, sy) {
   if (game.phase !== 'play') return;
+  // In online mode, block input while not our turn or while a request is pending.
+  if (NET.enabled && (!isMyTurn() || NET.inFlight)) return;
   const tile = tileAtScreen(sx, sy);
   if (!tile) {
     clearSelection();
@@ -1073,22 +1370,32 @@ function handleTap(sx, sy) {
       const targetUnit = game.unitAt(tile.q, tile.r);
       if (targetUnit && targetUnit.player !== sel.player) {
         // Attack
-        const events = attackUnit(game, sel, targetUnit);
-        if (events) {
-          showCombatToast(events[0]);
-          clearSelection();
-          checkWin();
-          updateAll();
-          return;
-        }
+        (async () => {
+          const events = await clientAttackUnit(sel, targetUnit);
+          if (events && events.length > 0) {
+            showCombatToast(events[0]);
+            clearSelection();
+            if (!NET.enabled) {
+              // Online refresh already handled win-detection in netRefreshAndRender.
+              checkWin();
+              updateAll();
+            }
+          }
+        })();
+        return;
       } else if (!targetUnit && sel.canMove) {
         // Move
-        if (moveUnit(game, sel, tile.q, tile.r)) {
-          // Keep selection so the player sees the unit can still attack (Rider Dash)
-          game.selected = { kind: 'unit', q: sel.q, r: sel.r };
-          updateAll();
-          return;
-        }
+        (async () => {
+          const moved = await clientMoveUnit(sel, tile.q, tile.r);
+          if (moved) {
+            // Keep selection on the new position so Rider Dash hints are visible.
+            // In online mode the unit reference is from a stale (pre-fetch) state
+            // — use the destination coordinates we requested.
+            game.selected = { kind: 'unit', q: tile.q, r: tile.r };
+            updateAll();
+          }
+        })();
+        return;
       }
     }
   }
@@ -1139,6 +1446,7 @@ const winTitle = document.getElementById('winTitle');
 const winSub = document.getElementById('winSub');
 const winRestartBtn = document.getElementById('winRestartBtn');
 const combatToast = document.getElementById('combatToast');
+const modePill = document.getElementById('modePill');
 
 let game = newGame(1);
 startTurn(game);
@@ -1150,6 +1458,26 @@ function updateTopBar() {
   turnPill.className = `pill ${cp === 0 ? 'p1' : 'p2'}`;
   endTurnBtn.className = cp === 1 ? 'p2' : '';
   endTurnBtn.textContent = `End ${pc.short} Turn`;
+  if (modePill) {
+    if (NET.enabled) {
+      const tag = NET.gameId ? NET.gameId.slice(0, 4) : '...';
+      const me = `P${NET.myPlayer + 1}`;
+      const mine = isMyTurn() ? 'your turn' : 'waiting';
+      modePill.textContent = `online · ${me} · ${mine} · ${tag}`;
+      modePill.className = 'pill';
+    } else {
+      modePill.textContent = 'offline';
+      modePill.className = 'pill muted';
+    }
+  }
+  // In online mode the End Turn button must be disabled when it isn't our turn.
+  if (NET.enabled) {
+    endTurnBtn.disabled = !isMyTurn() || NET.inFlight;
+    endTurnBtn.style.opacity = endTurnBtn.disabled ? '0.5' : '';
+  } else {
+    endTurnBtn.disabled = false;
+    endTurnBtn.style.opacity = '';
+  }
 }
 
 function updateHoverPill() {
@@ -1200,17 +1528,22 @@ function updateAll() {
 makeWarriorBtn.addEventListener('click', () => {
   if (!game.selected) return;
   const v = game.villageAt(game.selected.q, game.selected.r);
-  if (v && trainUnit(game, v, 'warrior')) updateAll();
+  if (v) clientTrainUnit(v, 'warrior');
 });
 makeRiderBtn.addEventListener('click', () => {
   if (!game.selected) return;
   const v = game.villageAt(game.selected.q, game.selected.r);
-  if (v && trainUnit(game, v, 'rider')) updateAll();
+  if (v) clientTrainUnit(v, 'rider');
 });
 apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
 endTurnBtn.addEventListener('click', () => {
   if (game.phase !== 'play') return;
+  if (NET.enabled) {
+    // Online: post EndTurn, then refresh. No pass overlay.
+    clientEndTurn();
+    return;
+  }
   endTurn(game);
   if (game.phase === 'won') {
     showWin();
@@ -1274,6 +1607,17 @@ function startNewGame() {
   const seedStr = seedInput.value;
   let seed = parseInt(seedStr, 10);
   if (!Number.isFinite(seed)) seed = Math.floor(Math.random() * 1e9);
+  if (NET.enabled) {
+    // Online: ask the server to create a new game; it owns map gen + state.
+    // The seed field is sent so the server can deterministically replay,
+    // but the server controls authoritative state.
+    seedInput.value = String(seed);
+    camera.reset();
+    clientStartNewGame(seed).catch(err => {
+      console.warn('Could not start online game:', err);
+    });
+    return;
+  }
   game = newGame(seed);
   startTurn(game);
   seedInput.value = String(seed);
@@ -1294,7 +1638,39 @@ window.addEventListener('resize', () => { resizeCanvas(); camera.recenter(); dra
 resizeCanvas();
 camera.reset();
 seedInput.value = '1';
-updateAll();
+
+(async function boot() {
+  const cfg = readNetConfigFromUrl();
+  if (cfg.enabled) {
+    NET.enabled = true;
+    NET.baseUrl = cfg.baseUrl;
+    NET.myPlayer = cfg.myPlayer;
+    try {
+      if (cfg.gameId) {
+        // Rejoin an existing game.
+        NET.gameId = cfg.gameId;
+        await netRefreshAndRender();
+      } else {
+        // Create a fresh online game.
+        await clientStartNewGame(undefined);
+      }
+      // Poll every 3s for opponent's moves when it isn't our turn.
+      setInterval(() => {
+        if (!NET.enabled) return;
+        if (NET.inFlight) return;
+        if (isMyTurn()) return;
+        netRefreshAndRender().catch(err => console.warn('Poll failed:', err));
+      }, 3000);
+    } catch (err) {
+      console.warn('Online boot failed; falling back to offline:', err);
+      NET.enabled = false;
+      updateAll();
+    }
+  } else {
+    // Offline default — pre-existing behavior, exactly as it was.
+    updateAll();
+  }
+})();
 
 </script>
 </body>
