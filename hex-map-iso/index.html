@@ -13,7 +13,6 @@
       --text: #e6ecff;
       --muted: #8b9bbf;
       --accent: #6ee7b7;
-      --accent-2: #93c5fd;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; touch-action: none; }
@@ -58,7 +57,7 @@
   <canvas id="canvas"></canvas>
 
   <div id="ui">
-    <div class="pill"><strong>Hex map</strong> <span class="muted" id="dimsLabel">12×12</span></div>
+    <div class="pill"><strong>Hex map</strong> <span class="muted" id="dimsLabel">radius 6 (91 tiles)</span></div>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
     <button class="pill" id="rerollBtn">Reroll</button>
     <button class="pill" id="resetViewBtn">Reset view</button>
@@ -78,12 +77,16 @@
 'use strict';
 
 // ============================================================
-// PROTOTYPE: 12x12 hex map, slightly isometric, mobile pan+zoom
+// PROTOTYPE v2: hex-shaped board (radius 6 = 91 tiles)
 // ------------------------------------------------------------
-// Deterministic generation from a numeric seed.
-// Flat-top hexes (better for landscape mobile per Phaser docs).
-// Iso effect = camera Y-shear (squashes Y axis to ~0.72 of X).
-// Mountains/trees render as 3D-ish billboards above tile center.
+// Flat-top hex layout, axial coords centered at origin.
+// Board shape = hexagon (not rectangle) so it's not slanted.
+// Tiles tessellate perfectly: corners computed in WORLD space
+// then projected to screen with the iso Y-squash applied
+// uniformly. No overlap, no gaps.
+// Iso squash dialled to 0.85 (mild — "slightly iso").
+// Mountains / trees / water shimmers render above each tile.
+// Mobile: 1-finger pan, 2-finger pinch zoom, tap to select.
 // ============================================================
 
 // ---- Seeded RNG (mulberry32) — deterministic across reloads ----
@@ -97,12 +100,12 @@ function mulberry32(seed) {
   };
 }
 
-// ---- Map params ----
-const GRID_COLS = 12;
-const GRID_ROWS = 12;
-const HEX_SIZE = 36;          // world-pixel "radius" (center to corner)
-const ISO_Y_SCALE = 0.72;     // squash Y for iso feel; 1.0 = top-down
-const TILE_THICKNESS = 7;     // pixel depth of tile "side" at base zoom
+// ---- Board params ----
+const BOARD_RADIUS = 6;       // hex radius from center; radius N => 3N^2 + 3N + 1 tiles
+                              // r=6 => 127 if rectangular bounding, but hex shape = 91 tiles
+const HEX_SIZE = 36;          // world-pixel "radius" of a hex (center to corner)
+const ISO_Y_SCALE = 0.85;     // 1.0 = top-down, 0.7 = strong iso. 0.85 = slight iso.
+const TILE_DEPTH = 6;         // pixel depth of the tile "side" at zoom 1
 
 // ---- Tile types ----
 const TILE = {
@@ -113,59 +116,76 @@ const TILE = {
 };
 
 // ============================================================
-// Map generation (pure, deterministic)
-//   Generates a 12x12 axial-coord hex map from a seed.
-//   Algorithm:
-//     1. Sample base elevation + moisture noise.
-//     2. Threshold to tile types.
-//     3. Cluster adjustments (lakes connect, forests grow).
+// Hex board generation
+// ------------------------------------------------------------
+// Axial coords (q, r) centered at origin. Hex-shape filter:
+//   include (q, r) where max(|q|, |r|, |-q-r|) <= radius
 // ============================================================
-function generateMap(seed, cols, rows) {
-  const rng = mulberry32(seed);
+function hexAxialsForRadius(radius) {
   const tiles = [];
-  // Drop a small number of "centers" per type, distance-weighted
-  const waterCenters = pickRandomPoints(rng, 3, cols, rows);
-  const treeCenters  = pickRandomPoints(rng, 5, cols, rows);
-  const mountainCenters = pickRandomPoints(rng, 3, cols, rows);
-
-  for (let q = 0; q < cols; q++) {
-    for (let r = 0; r < rows; r++) {
-      const x = q;
-      const y = r;
-      const waterScore = minDistance(x, y, waterCenters) + 0.5 * rng();
-      const treeScore  = minDistance(x, y, treeCenters)  + 0.6 * rng();
-      const mountScore = minDistance(x, y, mountainCenters) + 0.4 * rng();
-
-      // Lower score = stronger pull toward that type
-      let type = TILE.PLAINS;
-      if (waterScore < 1.6) type = TILE.WATER;
-      else if (mountScore < 1.5) type = TILE.MOUNTAIN;
-      else if (treeScore < 1.8) type = TILE.TREES;
-
-      // Edge bias: pull the borders toward water/mountain so the map
-      // feels like an island rather than abrupt cropping.
-      const edgeDist = Math.min(q, r, cols - 1 - q, rows - 1 - r);
-      if (edgeDist === 0 && rng() < 0.55) type = TILE.WATER;
-      else if (edgeDist === 1 && rng() < 0.22) type = TILE.WATER;
-
-      tiles.push({ q, r, type });
+  for (let q = -radius; q <= radius; q++) {
+    for (let r = -radius; r <= radius; r++) {
+      const s = -q - r;
+      if (Math.max(Math.abs(q), Math.abs(r), Math.abs(s)) <= radius) {
+        tiles.push({ q, r });
+      }
     }
   }
-  return { cols, rows, tiles, seed };
+  return tiles;
 }
 
-function pickRandomPoints(rng, n, cols, rows) {
-  const pts = [];
-  for (let i = 0; i < n; i++) {
-    pts.push({ x: rng() * cols, y: rng() * rows });
+function generateMap(seed, radius) {
+  const rng = mulberry32(seed);
+  const cells = hexAxialsForRadius(radius);
+
+  // Drop seed "centers" for each terrain type in axial space
+  function pickAxialPoints(n) {
+    const pts = [];
+    for (let i = 0; i < n; i++) {
+      pts.push({
+        q: (rng() * 2 - 1) * radius,
+        r: (rng() * 2 - 1) * radius,
+      });
+    }
+    return pts;
   }
-  return pts;
+
+  const waterCenters = pickAxialPoints(3);
+  const treeCenters  = pickAxialPoints(5);
+  const mountainCenters = pickAxialPoints(3);
+
+  const tiles = cells.map(({ q, r }) => {
+    const waterScore = minAxialDistance(q, r, waterCenters) + 0.5 * rng();
+    const treeScore  = minAxialDistance(q, r, treeCenters)  + 0.6 * rng();
+    const mountScore = minAxialDistance(q, r, mountainCenters) + 0.4 * rng();
+
+    let type = TILE.PLAINS;
+    if (waterScore < 1.6) type = TILE.WATER;
+    else if (mountScore < 1.5) type = TILE.MOUNTAIN;
+    else if (treeScore < 1.8) type = TILE.TREES;
+
+    // Edge bias: outer ring pulls toward water so the board reads as
+    // an island rather than abrupt cropping
+    const s = -q - r;
+    const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
+    if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
+    else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
+
+    return { q, r, type };
+  });
+
+  return { radius, tiles, seed };
 }
 
-function minDistance(x, y, points) {
+function minAxialDistance(q, r, points) {
   let best = Infinity;
   for (const p of points) {
-    const d = Math.hypot(x - p.x, y - p.y);
+    // Approximate axial distance via cube-distance formula
+    const d = Math.max(
+      Math.abs(q - p.q),
+      Math.abs(r - p.r),
+      Math.abs((q + r) - (p.q + p.r))
+    );
     if (d < best) best = d;
   }
   return best;
@@ -173,57 +193,82 @@ function minDistance(x, y, points) {
 
 // ============================================================
 // Hex math (flat-top axial → world coords)
-//   For flat-top: x = size * 1.5 * q;
-//                 y = size * sqrt(3) * (r + q/2)
+// ------------------------------------------------------------
+// For flat-top hex with "size" = corner radius:
+//   width  = 2 * size
+//   height = sqrt(3) * size
+//   x = size * 1.5 * q
+//   y = size * sqrt(3) * (r + q/2)
+// Corners at angles 0°, 60°, ..., 300° relative to center.
 // ============================================================
 const SQRT3 = Math.sqrt(3);
 
-function axialToWorld(q, r, size) {
-  const x = size * 1.5 * q;
-  const y = size * SQRT3 * (r + q / 2);
-  return { x, y };
+function axialToWorld(q, r) {
+  return {
+    x: HEX_SIZE * 1.5 * q,
+    y: HEX_SIZE * SQRT3 * (r + q / 2),
+  };
 }
 
-function flatTopCorners(cx, cy, size) {
-  // Flat-top hex: corners at 0°, 60°, 120°, 180°, 240°, 300°.
-  const corners = [];
+function flatTopCornerOffsets() {
+  // Cached at module level — pure geometry, same every call
+  const offsets = [];
   for (let i = 0; i < 6; i++) {
     const a = (Math.PI / 180) * (60 * i);
-    corners.push({ x: cx + size * Math.cos(a), y: cy + size * Math.sin(a) });
+    offsets.push({ x: HEX_SIZE * Math.cos(a), y: HEX_SIZE * Math.sin(a) });
   }
-  return corners;
+  return offsets;
 }
+const HEX_CORNER_OFFSETS = flatTopCornerOffsets();
 
 // ============================================================
 // Camera (pan + pinch zoom)
-//   World coords are in unsquashed hex coords. Screen coords
-//   apply Y-shear via ISO_Y_SCALE then camera pan/zoom.
+//   World coords = unsquashed hex coords centered on origin.
+//   Screen coords = camera offset + (world * zoom), with Y
+//   scaled by ISO_Y_SCALE uniformly — so positions AND hex
+//   geometry are squashed the same amount. Tessellation holds.
 // ============================================================
 const camera = {
-  x: 0, y: 0,    // pan offset (world units, pre-iso-squash)
+  x: 0, y: 0,    // pan offset in screen coords
   zoom: 1,
   reset() { this.zoom = 1; this.recenter(); },
   recenter() {
-    // Center the map in the viewport.
-    const mapW = HEX_SIZE * 1.5 * (GRID_COLS - 1) + HEX_SIZE * 2;
-    const mapH = (HEX_SIZE * SQRT3 * (GRID_ROWS - 1 + (GRID_COLS - 1) / 2) + HEX_SIZE * 2) * ISO_Y_SCALE;
-    this.x = (canvas.width / dpr - mapW * this.zoom) / 2 - HEX_SIZE * this.zoom;
-    this.y = (canvas.height / dpr - mapH * this.zoom) / 2 - HEX_SIZE * ISO_Y_SCALE * this.zoom;
+    // World origin is at the center of the board (hex board centered on (0,0)).
+    // Recenter: world (0,0) → screen center.
+    this.x = canvas.width / dpr / 2;
+    this.y = canvas.height / dpr / 2;
   }
 };
 
 function worldToScreen(wx, wy) {
   return {
     x: camera.x + wx * camera.zoom,
-    y: camera.y + wy * ISO_Y_SCALE * camera.zoom,
+    y: camera.y + wy * camera.zoom * ISO_Y_SCALE,
   };
 }
 
 function screenToWorld(sx, sy) {
   return {
     x: (sx - camera.x) / camera.zoom,
-    y: (sy - camera.y) / camera.zoom / ISO_Y_SCALE,
+    y: (sy - camera.y) / (camera.zoom * ISO_Y_SCALE),
   };
+}
+
+// Get the 6 screen corners of a tile (flat-top, projected through camera).
+// Corners are computed in world space (perfect tessellation), then projected.
+function tileScreenCorners(q, r) {
+  const w = axialToWorld(q, r);
+  const out = [];
+  for (let i = 0; i < 6; i++) {
+    const wo = HEX_CORNER_OFFSETS[i];
+    out.push(worldToScreen(w.x + wo.x, w.y + wo.y));
+  }
+  return out;
+}
+
+function tileScreenCenter(q, r) {
+  const w = axialToWorld(q, r);
+  return worldToScreen(w.x, w.y);
 }
 
 // ============================================================
@@ -242,86 +287,72 @@ function resizeCanvas() {
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function drawHexFlatTop(cx, cy, size, fill, stroke) {
-  const corners = flatTopCorners(cx, cy * ISO_Y_SCALE, size);
-  // Apply iso squash to corners individually so the hex is squashed too
-  ctx.beginPath();
-  for (let i = 0; i < corners.length; i++) {
-    const c = corners[i];
-    const sy = (c.y - cy * ISO_Y_SCALE) * ISO_Y_SCALE + cy * ISO_Y_SCALE;
-    // Above is a no-op visualization; the actual squash happens via camera Y scale.
-    // We keep the hex shape "true" and let the camera/world transform squash it.
-    if (i === 0) ctx.moveTo(c.x, c.y);
-    else ctx.lineTo(c.x, c.y);
-  }
-  ctx.closePath();
-  if (fill) { ctx.fillStyle = fill; ctx.fill(); }
-  if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1 / camera.zoom; ctx.stroke(); }
-}
-
 function drawTile(tile) {
-  const w = axialToWorld(tile.q, tile.r, HEX_SIZE);
-  const cx = camera.x + w.x * camera.zoom;
-  const cy = camera.y + w.y * ISO_Y_SCALE * camera.zoom;
-  const sz = HEX_SIZE * camera.zoom;
+  const corners = tileScreenCorners(tile.q, tile.r);
+  const center = tileScreenCenter(tile.q, tile.r);
+  const sz = HEX_SIZE * camera.zoom;          // for feature sizing
+  const szY = sz * ISO_Y_SCALE;               // for vertical feature sizing
+  const depth = TILE_DEPTH * camera.zoom;
   const type = tile.type;
 
-  // Draw a small "tile thickness" rectangle below for depth
+  // ---- Side wall (tile "thickness") ----
+  // The bottom-front edge of the hex. For a flat-top hex with corner index
+  // starting at 0° (right), corners 1 (60°), 2 (120°), 3 (180°), 4 (240°), 5 (300°).
+  // The "front" half (bottom of screen) is corners 1, 2, 3 going CW from right-side.
+  // Drop those corners by `depth` to form the visible wall.
   if (type !== TILE.WATER) {
-    const corners = flatTopCorners(cx, cy, sz);
-    // Find the bottom 3 corners (corners 2, 3, 4 for flat-top: bottom-right, bottom-left mid, bottom-left)
-    ctx.fillStyle = type.side;
+    const front = [corners[1], corners[2], corners[3]]; // visible bottom-front edge
     ctx.beginPath();
-    ctx.moveTo(corners[1].x, corners[1].y);
-    ctx.lineTo(corners[2].x, corners[2].y);
-    ctx.lineTo(corners[3].x, corners[3].y);
-    ctx.lineTo(corners[4].x, corners[4].y);
-    ctx.lineTo(corners[4].x, corners[4].y + TILE_THICKNESS * camera.zoom);
-    ctx.lineTo(corners[3].x, corners[3].y + TILE_THICKNESS * camera.zoom);
-    ctx.lineTo(corners[2].x, corners[2].y + TILE_THICKNESS * camera.zoom);
-    ctx.lineTo(corners[1].x, corners[1].y + TILE_THICKNESS * camera.zoom);
+    ctx.moveTo(front[0].x, front[0].y);
+    ctx.lineTo(front[1].x, front[1].y);
+    ctx.lineTo(front[2].x, front[2].y);
+    ctx.lineTo(front[2].x, front[2].y + depth);
+    ctx.lineTo(front[1].x, front[1].y + depth);
+    ctx.lineTo(front[0].x, front[0].y + depth);
     ctx.closePath();
+    ctx.fillStyle = type.side;
     ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+    ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
+    ctx.stroke();
   }
 
-  // Hex top
-  const corners = flatTopCorners(cx, cy, sz);
+  // ---- Hex top ----
   ctx.beginPath();
-  for (let i = 0; i < corners.length; i++) {
-    if (i === 0) ctx.moveTo(corners[i].x, corners[i].y);
-    else ctx.lineTo(corners[i].x, corners[i].y);
-  }
+  ctx.moveTo(corners[0].x, corners[0].y);
+  for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
   ctx.closePath();
   ctx.fillStyle = type.top;
   ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+  ctx.strokeStyle = 'rgba(0,0,0,0.30)';
   ctx.lineWidth = Math.max(0.6, 1 / camera.zoom);
   ctx.stroke();
 
-  // Feature glyphs (trees / mountains) — small 3D billboards above tile center
-  if (type === TILE.TREES) drawTreeCluster(cx, cy, sz);
-  else if (type === TILE.MOUNTAIN) drawMountain(cx, cy, sz);
-  else if (type === TILE.WATER) drawWaterShine(cx, cy, sz);
+  // ---- Feature billboards ----
+  if (type === TILE.TREES) drawTreeCluster(center.x, center.y, sz, szY);
+  else if (type === TILE.MOUNTAIN) drawMountain(center.x, center.y, sz, szY);
+  else if (type === TILE.WATER) drawWaterShine(center.x, center.y, sz, szY);
 }
 
-function drawTreeCluster(cx, cy, sz) {
+function drawTreeCluster(cx, cy, sz, szY) {
+  // 3 small trees, slightly offset, with trunk + foliage triangle
   const positions = [
-    { dx: -0.18, dy: -0.05, h: 0.32 },
-    { dx:  0.20, dy:  0.05, h: 0.40 },
-    { dx:  0.00, dy: -0.22, h: 0.36 },
+    { dx: -0.20, dy:  0.04, h: 0.38 },
+    { dx:  0.22, dy:  0.08, h: 0.46 },
+    { dx:  0.02, dy: -0.20, h: 0.42 },
   ];
   for (const p of positions) {
     const x = cx + p.dx * sz;
-    const baseY = cy + p.dy * sz * ISO_Y_SCALE;
-    const topY = baseY - p.h * sz;
+    const baseY = cy + p.dy * szY;
+    const topY = baseY - p.h * sz; // trees stand UP in screen space, full height
     // Trunk
     ctx.fillStyle = '#5b3a29';
     ctx.fillRect(x - sz * 0.04, baseY - sz * 0.10, sz * 0.08, sz * 0.10);
-    // Foliage triangle
+    // Foliage (triangle)
     ctx.beginPath();
     ctx.moveTo(x, topY);
-    ctx.lineTo(x - sz * 0.18, baseY - sz * 0.08);
-    ctx.lineTo(x + sz * 0.18, baseY - sz * 0.08);
+    ctx.lineTo(x - sz * 0.18, baseY - sz * 0.06);
+    ctx.lineTo(x + sz * 0.18, baseY - sz * 0.06);
     ctx.closePath();
     ctx.fillStyle = '#166534';
     ctx.fill();
@@ -331,88 +362,79 @@ function drawTreeCluster(cx, cy, sz) {
   }
 }
 
-function drawMountain(cx, cy, sz) {
-  // Single big peak with a snowy cap
-  const peakX = cx;
-  const peakY = cy - sz * 0.65;
-  const baseY = cy + sz * 0.15;
+function drawMountain(cx, cy, sz, szY) {
+  // Single triangular peak with snow cap and shaded side
+  const baseY = cy + szY * 0.12;
+  const peakY = cy - sz * 0.70;
+  const baseW = sz * 0.85;
+  // Body
   ctx.beginPath();
-  ctx.moveTo(peakX, peakY);
-  ctx.lineTo(cx - sz * 0.45, baseY);
-  ctx.lineTo(cx + sz * 0.45, baseY);
+  ctx.moveTo(cx, peakY);
+  ctx.lineTo(cx - baseW / 2, baseY);
+  ctx.lineTo(cx + baseW / 2, baseY);
   ctx.closePath();
   ctx.fillStyle = '#7c6f5a';
   ctx.fill();
   ctx.strokeStyle = 'rgba(0,0,0,0.45)';
   ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
   ctx.stroke();
-  // Snow cap (top third)
+  // Snow cap (top ~30%)
   ctx.beginPath();
-  ctx.moveTo(peakX, peakY);
-  ctx.lineTo(cx - sz * 0.16, peakY + sz * 0.22);
-  ctx.lineTo(cx + sz * 0.16, peakY + sz * 0.22);
+  ctx.moveTo(cx, peakY);
+  ctx.lineTo(cx - baseW * 0.18, peakY + sz * 0.25);
+  ctx.lineTo(cx + baseW * 0.18, peakY + sz * 0.25);
   ctx.closePath();
   ctx.fillStyle = '#f3f4f6';
   ctx.fill();
-  // Shadow side
+  // Shadow on right face
   ctx.beginPath();
-  ctx.moveTo(peakX, peakY);
-  ctx.lineTo(cx + sz * 0.45, baseY);
+  ctx.moveTo(cx, peakY);
+  ctx.lineTo(cx + baseW / 2, baseY);
   ctx.lineTo(cx, baseY);
   ctx.closePath();
   ctx.fillStyle = 'rgba(0,0,0,0.18)';
   ctx.fill();
 }
 
-function drawWaterShine(cx, cy, sz) {
-  // A subtle horizontal shimmer line
-  ctx.strokeStyle = 'rgba(255,255,255,0.20)';
+function drawWaterShine(cx, cy, sz, szY) {
+  ctx.strokeStyle = 'rgba(255,255,255,0.22)';
   ctx.lineWidth = Math.max(0.6, 1.2 / camera.zoom);
   ctx.beginPath();
-  ctx.moveTo(cx - sz * 0.30, cy - sz * 0.05);
-  ctx.lineTo(cx + sz * 0.30, cy - sz * 0.05);
+  ctx.moveTo(cx - sz * 0.32, cy - szY * 0.08);
+  ctx.lineTo(cx + sz * 0.32, cy - szY * 0.08);
   ctx.stroke();
   ctx.beginPath();
-  ctx.moveTo(cx - sz * 0.15, cy + sz * 0.10);
-  ctx.lineTo(cx + sz * 0.15, cy + sz * 0.10);
+  ctx.moveTo(cx - sz * 0.18, cy + szY * 0.12);
+  ctx.lineTo(cx + sz * 0.18, cy + szY * 0.12);
   ctx.stroke();
 }
 
 // ============================================================
 // Frame
 // ============================================================
-let map = generateMap(1, GRID_COLS, GRID_ROWS);
+let map = generateMap(1, BOARD_RADIUS);
 let hovered = null;
 
 function draw() {
   ctx.fillStyle = '#0b1220';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Sort tiles so the ones rendered "back" first (smaller r + q),
-  // and those in front (larger r) are painted over them. This gives
-  // the iso layering effect when mountains overlap.
+  // Render order: back (small projected y) first, front later, so
+  // mountain peaks and tile sides correctly overlap.
   const sorted = [...map.tiles].sort((a, b) => {
-    // Render order: by world y (after iso squash) so taller things
-    // in front overlap shorter things behind.
-    const aw = axialToWorld(a.q, a.r, HEX_SIZE);
-    const bw = axialToWorld(b.q, b.r, HEX_SIZE);
+    const aw = axialToWorld(a.q, a.r);
+    const bw = axialToWorld(b.q, b.r);
     return aw.y - bw.y;
   });
 
   for (const t of sorted) drawTile(t);
 
-  // Hover ring
+  // Selected ring
   if (hovered) {
-    const w = axialToWorld(hovered.q, hovered.r, HEX_SIZE);
-    const cx = camera.x + w.x * camera.zoom;
-    const cy = camera.y + w.y * ISO_Y_SCALE * camera.zoom;
-    const sz = HEX_SIZE * camera.zoom;
-    const corners = flatTopCorners(cx, cy, sz);
+    const corners = tileScreenCorners(hovered.q, hovered.r);
     ctx.beginPath();
-    for (let i = 0; i < corners.length; i++) {
-      if (i === 0) ctx.moveTo(corners[i].x, corners[i].y);
-      else ctx.lineTo(corners[i].x, corners[i].y);
-    }
+    ctx.moveTo(corners[0].x, corners[0].y);
+    for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
     ctx.closePath();
     ctx.strokeStyle = '#fcd34d';
     ctx.lineWidth = 2.5;
@@ -428,19 +450,18 @@ function tileAtScreen(sx, sy) {
   let best = null;
   let bestDist = Infinity;
   for (const t of map.tiles) {
-    const tw = axialToWorld(t.q, t.r, HEX_SIZE);
+    const tw = axialToWorld(t.q, t.r);
     const d = Math.hypot(w.x - tw.x, w.y - tw.y);
     if (d < bestDist) { bestDist = d; best = t; }
   }
-  // Cap distance to size; otherwise empty taps register as edge tiles
-  if (bestDist < HEX_SIZE * 1.1) return best;
+  if (bestDist < HEX_SIZE * 1.05) return best;
   return null;
 }
 
 // ============================================================
 // Pointer handling — 1 finger pan/tap, 2 fingers pinch zoom
 // ============================================================
-const pointers = new Map(); // id → {x, y}
+const pointers = new Map();
 let pinchBaseDist = 0;
 let pinchBaseZoom = 1;
 let pinchBaseCenter = { x: 0, y: 0 };
@@ -463,7 +484,6 @@ function pointerDown(e) {
 function pointerMove(e) {
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
-
   if (pointers.size === 1 && panBase) {
     const dx = e.clientX - panBase.x;
     const dy = e.clientY - panBase.y;
@@ -476,7 +496,6 @@ function pointerMove(e) {
     const newDist = Math.hypot(a.x - b.x, a.y - b.y);
     if (pinchBaseDist > 0) {
       const newZoom = clamp(pinchBaseZoom * (newDist / pinchBaseDist), 0.4, 3.0);
-      // Zoom around pinch center
       const cx = pinchBaseCenter.x;
       const cy = pinchBaseCenter.y;
       const ratio = newZoom / camera.zoom;
@@ -494,7 +513,6 @@ function pointerUp(e) {
   pointers.delete(e.pointerId);
   if (pointers.size === 0) {
     if (wasOnePointer && !didDrag) {
-      // Treat as a tap → hover/select
       const t = tileAtScreen(e.clientX, e.clientY);
       hovered = t;
       updateHoverLabel();
@@ -502,7 +520,6 @@ function pointerUp(e) {
     }
     panBase = null;
   } else if (pointers.size === 1) {
-    // Coming out of pinch → re-base pan
     const [p] = [...pointers.values()];
     panBase = { x: p.x, y: p.y, camX: camera.x, camY: camera.y };
   }
@@ -544,7 +561,7 @@ const dimsLabel = document.getElementById('dimsLabel');
 function setSeed(s) {
   const n = parseInt(s, 10);
   if (!Number.isFinite(n)) return;
-  map = generateMap(n, GRID_COLS, GRID_ROWS);
+  map = generateMap(n, BOARD_RADIUS);
   seedInput.value = String(n);
   hovered = null;
   updateHoverLabel();
@@ -566,7 +583,7 @@ function updateHoverLabel() {
   else hoverLabel.textContent = '—';
 }
 
-dimsLabel.textContent = `${GRID_COLS}×${GRID_ROWS}`;
+dimsLabel.textContent = `radius ${BOARD_RADIUS} (${map.tiles.length} tiles)`;
 
 // ============================================================
 // Boot
