@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>TBS — Tech Tree (drag-to-research)</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    height: 100%;
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    overflow: hidden;
+    user-select: none;
+    -webkit-user-select: none;
+    touch-action: none;
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 10;
+  }
+  #left, #right { pointer-events: auto; }
+  #title { font-size: 14px; opacity: 0.7; }
+  #subtitle { font-size: 11px; opacity: 0.5; margin-top: 2px; }
+  #stats {
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  #stats .label { font-size: 11px; opacity: 0.55; }
+  #stats .num { font-size: 22px; font-weight: 600; }
+  #stats .row { margin-bottom: 8px; }
+  #reset {
+    margin-top: 6px;
+    padding: 6px 14px;
+    background: #334155;
+    color: #f1f5f9;
+    border: 1px solid #475569;
+    border-radius: 6px;
+    font-size: 12px;
+    cursor: pointer;
+    font-weight: 500;
+  }
+  #reset:hover { background: #475569; }
+  canvas { display: block; cursor: pointer; }
+  #modal {
+    position: fixed;
+    inset: 0;
+    background: rgba(15, 23, 42, 0.85);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    z-index: 100;
+    backdrop-filter: blur(4px);
+  }
+  #modal.open { display: flex; }
+  #modal-card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 12px;
+    padding: 28px 32px;
+    min-width: 320px;
+    max-width: 400px;
+    box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+  }
+  #modal-card h2 {
+    font-size: 18px;
+    margin-bottom: 4px;
+    font-weight: 600;
+  }
+  #modal-card .from {
+    font-size: 12px;
+    opacity: 0.6;
+    margin-bottom: 18px;
+  }
+  #modal-card .cost-line {
+    background: #0f172a;
+    padding: 14px 18px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  #modal-card .cost-label { font-size: 13px; opacity: 0.7; }
+  #modal-card .cost-val {
+    font-size: 26px;
+    font-weight: 700;
+    color: #fbbf24;
+    font-variant-numeric: tabular-nums;
+  }
+  #modal-card .distance {
+    font-size: 11px;
+    opacity: 0.5;
+    text-align: center;
+    margin-bottom: 18px;
+  }
+  .btns { display: flex; gap: 10px; }
+  .btn {
+    flex: 1;
+    padding: 12px 0;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .btn-accept { background: #22c55e; color: #052e16; }
+  .btn-accept:hover { background: #16a34a; }
+  .btn-cancel { background: #475569; color: #f1f5f9; }
+  .btn-cancel:hover { background: #334155; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div id="left">
+    <div id="title">TBS — Drag-to-Research Tech Tree (prototype)</div>
+    <div id="subtitle">Drag from any green tech to any other tech. Distance = cost.</div>
+  </div>
+  <div id="right">
+    <div id="stats">
+      <div class="row">
+        <div class="label">SPENT</div>
+        <div class="num" id="spent">0</div>
+      </div>
+      <div class="row">
+        <div class="label">RESEARCHED</div>
+        <div class="num" id="owned-count">5</div>
+      </div>
+      <button id="reset">RESET</button>
+    </div>
+  </div>
+</div>
+
+<canvas id="c"></canvas>
+
+<div id="modal">
+  <div id="modal-card">
+    <h2 id="modal-title">Research [Tech]</h2>
+    <div class="from" id="modal-from">From [SourceTech]</div>
+    <div class="cost-line">
+      <span class="cost-label">Cost</span>
+      <span class="cost-val" id="modal-cost">0 ★</span>
+    </div>
+    <div class="distance" id="modal-distance">distance: 0 px</div>
+    <div class="btns">
+      <button class="btn btn-cancel" id="btn-cancel">Cancel</button>
+      <button class="btn btn-accept" id="btn-accept">Accept</button>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+// Polytopia tech tree (Path of the Ocean ruleset). 5 starting techs at
+// tier 1, each unlocks 2 tier-2 children, each of those unlocks 1
+// tier-3 grandchild. 5 + 10 + 10 = 25 techs total.
+const TECHS = [
+  // Tier 1 (starting — free, all owned at start)
+  { id: 'climbing',     name: 'Climbing',     tier: 1, parent: null },
+  { id: 'fishing',      name: 'Fishing',      tier: 1, parent: null },
+  { id: 'hunting',      name: 'Hunting',      tier: 1, parent: null },
+  { id: 'organization', name: 'Organization', tier: 1, parent: null },
+  { id: 'riding',       name: 'Riding',       tier: 1, parent: null },
+
+  // Tier 2
+  { id: 'mining',      name: 'Mining',      tier: 2, parent: 'climbing' },
+  { id: 'meditation',  name: 'Meditation',  tier: 2, parent: 'climbing' },
+  { id: 'sailing',     name: 'Sailing',     tier: 2, parent: 'fishing' },
+  { id: 'whaling',     name: 'Whaling',     tier: 2, parent: 'fishing' },
+  { id: 'archery',     name: 'Archery',     tier: 2, parent: 'hunting' },
+  { id: 'forestry',    name: 'Forestry',    tier: 2, parent: 'hunting' },
+  { id: 'farming',     name: 'Farming',     tier: 2, parent: 'organization' },
+  { id: 'strategy',    name: 'Strategy',    tier: 2, parent: 'organization' },
+  { id: 'roads',       name: 'Roads',       tier: 2, parent: 'riding' },
+  { id: 'freespirit',  name: 'Free Spirit', tier: 2, parent: 'riding' },
+
+  // Tier 3
+  { id: 'smithery',     name: 'Smithery',     tier: 3, parent: 'mining' },
+  { id: 'philosophy',   name: 'Philosophy',   tier: 3, parent: 'meditation' },
+  { id: 'navigation',   name: 'Navigation',   tier: 3, parent: 'sailing' },
+  { id: 'aquatism',     name: 'Aquatism',     tier: 3, parent: 'whaling' },
+  { id: 'spiritualism', name: 'Spiritualism', tier: 3, parent: 'archery' },
+  { id: 'mathematics',  name: 'Mathematics',  tier: 3, parent: 'forestry' },
+  { id: 'construction', name: 'Construction', tier: 3, parent: 'farming' },
+  { id: 'diplomacy',    name: 'Diplomacy',    tier: 3, parent: 'strategy' },
+  { id: 'trade',        name: 'Trade',        tier: 3, parent: 'roads' },
+  { id: 'chivalry',     name: 'Chivalry',     tier: 3, parent: 'freespirit' },
+];
+
+// ── Layout ─────────────────────────────────────────────────────────────
+// Radial: T1 in inner ring; T2s fan out from their T1; T3s fan out from
+// their T2. Built once on resize.
+const RING_RADII = { 1: 0.16, 2: 0.34, 3: 0.50 }; // fraction of min(W,H)
+const NODE_RADIUS = 36;
+
+let canvas, ctx, W, H, CX, CY;
+
+function layout() {
+  canvas.width = W = window.innerWidth * devicePixelRatio;
+  canvas.height = H = window.innerHeight * devicePixelRatio;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+  ctx.scale(devicePixelRatio, devicePixelRatio);
+  CX = window.innerWidth / 2;
+  CY = window.innerHeight / 2;
+
+  const minDim = Math.min(window.innerWidth, window.innerHeight);
+
+  // T1: 5 evenly around the inner ring
+  const t1Tech = TECHS.filter(t => t.tier === 1);
+  t1Tech.forEach((t, i) => {
+    const angle = (i / t1Tech.length) * Math.PI * 2 - Math.PI / 2;
+    t._angle = angle;
+    t.x = CX + Math.cos(angle) * minDim * RING_RADII[1];
+    t.y = CY + Math.sin(angle) * minDim * RING_RADII[1];
+  });
+
+  // T2: each T1 has 2 children; fan them ±18° from parent angle
+  t1Tech.forEach(parent => {
+    const children = TECHS.filter(t => t.parent === parent.id);
+    children.forEach((c, j) => {
+      const offset = (j - (children.length - 1) / 2) * (Math.PI / 10);
+      const angle = parent._angle + offset;
+      c._angle = angle;
+      c.x = CX + Math.cos(angle) * minDim * RING_RADII[2];
+      c.y = CY + Math.sin(angle) * minDim * RING_RADII[2];
+    });
+  });
+
+  // T3: each T2 has 1 child; extend directly outward from parent angle
+  const t2 = TECHS.filter(t => t.tier === 2);
+  t2.forEach(parent => {
+    const child = TECHS.find(t => t.parent === parent.id);
+    if (!child) return;
+    child._angle = parent._angle;
+    child.x = CX + Math.cos(parent._angle) * minDim * RING_RADII[3];
+    child.y = CY + Math.sin(parent._angle) * minDim * RING_RADII[3];
+  });
+}
+
+// ── State ──────────────────────────────────────────────────────────────
+let owned = new Set();
+let spent = 0;
+
+// Drag state
+let drag = null; // { fromTech, pointerX, pointerY, hoverTech }
+
+// Cost formula — tweakable. Distance is in screen pixels.
+// Math.round(distance / 4) feels right at typical screen sizes:
+//   short jump (parent → child same ring): ~25 ★
+//   long jump (T1 across to T3 far side): ~100 ★
+function costFor(fromTech, toTech) {
+  const dx = fromTech.x - toTech.x;
+  const dy = fromTech.y - toTech.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 4)) };
+}
+
+function reset() {
+  owned.clear();
+  TECHS.filter(t => t.tier === 1).forEach(t => owned.add(t.id));
+  spent = 0;
+  updateHUD();
+  draw();
+}
+
+function updateHUD() {
+  document.getElementById('spent').textContent = spent;
+  document.getElementById('owned-count').textContent = owned.size;
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+
+  // Background hex pattern (subtle)
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.04)';
+  ctx.lineWidth = 1;
+  for (let r = 60; r < Math.max(window.innerWidth, window.innerHeight); r += 80) {
+    ctx.beginPath();
+    ctx.arc(CX, CY, r, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
+  // Faint parent → child guide lines
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+  ctx.lineWidth = 1;
+  TECHS.forEach(t => {
+    if (t.parent) {
+      const p = TECHS.find(x => x.id === t.parent);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(t.x, t.y);
+      ctx.stroke();
+    }
+  });
+
+  // Drag line (if dragging)
+  if (drag) {
+    const hover = drag.hoverTech;
+    const targetX = hover ? hover.x : drag.pointerX;
+    const targetY = hover ? hover.y : drag.pointerY;
+
+    // Cost preview color: green if affordable / valid, amber otherwise
+    const valid = hover && !owned.has(hover.id);
+    ctx.strokeStyle = valid ? '#fbbf24' : 'rgba(251, 191, 36, 0.4)';
+    ctx.lineWidth = 3;
+    ctx.setLineDash([8, 4]);
+    ctx.beginPath();
+    ctx.moveTo(drag.fromTech.x, drag.fromTech.y);
+    ctx.lineTo(targetX, targetY);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    // Live cost label at midpoint
+    if (hover && !owned.has(hover.id)) {
+      const { cost, dist } = costFor(drag.fromTech, hover);
+      const mx = (drag.fromTech.x + hover.x) / 2;
+      const my = (drag.fromTech.y + hover.y) / 2;
+      ctx.font = 'bold 16px -apple-system';
+      ctx.fillStyle = '#0f172a';
+      ctx.strokeStyle = '#fbbf24';
+      ctx.lineWidth = 6;
+      const label = `${cost} ★`;
+      const tw = ctx.measureText(label).width;
+      ctx.beginPath();
+      ctx.roundRect(mx - tw/2 - 10, my - 14, tw + 20, 28, 14);
+      ctx.fillStyle = '#fbbf24';
+      ctx.fill();
+      ctx.fillStyle = '#0f172a';
+      ctx.fillText(label, mx - tw/2, my + 5);
+    }
+  }
+
+  // Nodes
+  TECHS.forEach(t => {
+    const isOwned = owned.has(t.id);
+    const isHovered = drag && drag.hoverTech && drag.hoverTech.id === t.id && !isOwned;
+    const isSource = drag && drag.fromTech.id === t.id;
+
+    // Tier ring (outer)
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, NODE_RADIUS + 4, 0, Math.PI * 2);
+    if (isOwned) {
+      ctx.fillStyle = '#22c55e';
+    } else if (isHovered) {
+      ctx.fillStyle = '#fbbf24';
+    } else {
+      ctx.fillStyle = ['', '#3b82f6', '#8b5cf6', '#ec4899'][t.tier] || '#64748b';
+    }
+    ctx.globalAlpha = isSource ? 1 : (isOwned ? 1 : 0.6);
+    ctx.fill();
+
+    // Inner fill
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, NODE_RADIUS, 0, Math.PI * 2);
+    ctx.fillStyle = isOwned ? '#15803d' : '#1e293b';
+    ctx.globalAlpha = 1;
+    ctx.fill();
+
+    // Tier number badge
+    ctx.font = 'bold 11px -apple-system';
+    ctx.fillStyle = isOwned ? '#bbf7d0' : 'rgba(226, 232, 240, 0.5)';
+    const tierTxt = 'T' + t.tier;
+    const ttw = ctx.measureText(tierTxt).width;
+    ctx.fillText(tierTxt, t.x - ttw/2, t.y - 6);
+
+    // Tech name
+    ctx.font = 'bold 12px -apple-system';
+    ctx.fillStyle = isOwned ? '#ffffff' : '#e2e8f0';
+    const name = t.name;
+    const nw = ctx.measureText(name).width;
+    if (nw > NODE_RADIUS * 1.7) {
+      // Two-line if too long
+      const parts = name.split(' ');
+      if (parts.length >= 2) {
+        const top = parts[0];
+        const bot = parts.slice(1).join(' ');
+        const tw1 = ctx.measureText(top).width;
+        const tw2 = ctx.measureText(bot).width;
+        ctx.fillText(top, t.x - tw1/2, t.y + 8);
+        ctx.fillText(bot, t.x - tw2/2, t.y + 22);
+      } else {
+        // Force shrink
+        ctx.font = 'bold 10px -apple-system';
+        const nw2 = ctx.measureText(name).width;
+        ctx.fillText(name, t.x - nw2/2, t.y + 12);
+      }
+    } else {
+      ctx.fillText(name, t.x - nw/2, t.y + 12);
+    }
+  });
+}
+
+// ── Input ──────────────────────────────────────────────────────────────
+function getPointerPos(e) {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches ? e.touches[0] : e;
+  return { x: t.clientX - r.left, y: t.clientY - r.top };
+}
+
+function techAt(x, y) {
+  for (const t of TECHS) {
+    const dx = x - t.x;
+    const dy = y - t.y;
+    if (dx*dx + dy*dy <= (NODE_RADIUS + 4) * (NODE_RADIUS + 4)) return t;
+  }
+  return null;
+}
+
+function onDown(e) {
+  e.preventDefault();
+  const p = getPointerPos(e);
+  const t = techAt(p.x, p.y);
+  if (!t || !owned.has(t.id)) return;
+  drag = { fromTech: t, pointerX: p.x, pointerY: p.y, hoverTech: null };
+  draw();
+}
+
+function onMove(e) {
+  if (!drag) return;
+  e.preventDefault();
+  const p = getPointerPos(e);
+  drag.pointerX = p.x;
+  drag.pointerY = p.y;
+  const t = techAt(p.x, p.y);
+  drag.hoverTech = (t && !owned.has(t.id) && t.id !== drag.fromTech.id) ? t : null;
+  draw();
+}
+
+function onUp(e) {
+  if (!drag) return;
+  e.preventDefault();
+  const hover = drag.hoverTech;
+  if (hover && !owned.has(hover.id)) {
+    openModal(drag.fromTech, hover);
+  }
+  drag = null;
+  draw();
+}
+
+// ── Modal ──────────────────────────────────────────────────────────────
+let pending = null;
+
+function openModal(from, to) {
+  const { cost, dist } = costFor(from, to);
+  pending = { from, to, cost };
+  document.getElementById('modal-title').textContent = 'Research ' + to.name;
+  document.getElementById('modal-from').textContent = 'From ' + from.name + ' (Tier ' + to.tier + ')';
+  document.getElementById('modal-cost').textContent = cost + ' ★';
+  document.getElementById('modal-distance').textContent = 'distance: ' + dist + ' px';
+  document.getElementById('modal').classList.add('open');
+}
+
+function closeModal() {
+  document.getElementById('modal').classList.remove('open');
+  pending = null;
+}
+
+document.getElementById('btn-accept').addEventListener('click', () => {
+  if (!pending) return;
+  owned.add(pending.to.id);
+  spent += pending.cost;
+  updateHUD();
+  closeModal();
+  draw();
+});
+
+document.getElementById('btn-cancel').addEventListener('click', closeModal);
+
+document.getElementById('reset').addEventListener('click', reset);
+
+// ── Bootstrap ──────────────────────────────────────────────────────────
+function init() {
+  canvas = document.getElementById('c');
+  ctx = canvas.getContext('2d');
+  // Polyfill roundRect for older browsers
+  if (!ctx.roundRect) {
+    ctx.roundRect = function(x, y, w, h, r) {
+      this.beginPath();
+      this.moveTo(x + r, y);
+      this.lineTo(x + w - r, y);
+      this.quadraticCurveTo(x + w, y, x + w, y + r);
+      this.lineTo(x + w, y + h - r);
+      this.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      this.lineTo(x + r, y + h);
+      this.quadraticCurveTo(x, y + h, x, y + h - r);
+      this.lineTo(x, y + r);
+      this.quadraticCurveTo(x, y, x + r, y);
+      this.closePath();
+    };
+  }
+  layout();
+  reset();
+
+  canvas.addEventListener('mousedown', onDown);
+  canvas.addEventListener('mousemove', onMove);
+  canvas.addEventListener('mouseup', onUp);
+  canvas.addEventListener('touchstart', onDown, { passive: false });
+  canvas.addEventListener('touchmove', onMove, { passive: false });
+  canvas.addEventListener('touchend', onUp, { passive: false });
+
+  window.addEventListener('resize', () => { layout(); draw(); });
+}
+
+init();
+</script>
+
+</body>
+</html>
