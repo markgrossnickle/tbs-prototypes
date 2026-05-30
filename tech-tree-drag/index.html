@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, user-scalable=yes">
 <title>TBS — Tech Tree (drag-to-research)</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -14,8 +14,9 @@
     overflow: hidden;
     user-select: none;
     -webkit-user-select: none;
-    touch-action: none;
   }
+  /* canvas handles its own gestures; allow no native scroll/zoom */
+  canvas { display: block; cursor: pointer; touch-action: none; }
   #hud {
     position: fixed;
     top: 12px;
@@ -29,15 +30,12 @@
   }
   #left, #right { pointer-events: auto; }
   #title { font-size: 14px; opacity: 0.7; }
-  #subtitle { font-size: 11px; opacity: 0.5; margin-top: 2px; }
-  #stats {
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
+  #subtitle { font-size: 11px; opacity: 0.5; margin-top: 2px; max-width: 260px; line-height: 1.4; }
+  #stats { text-align: right; font-variant-numeric: tabular-nums; }
   #stats .label { font-size: 11px; opacity: 0.55; }
   #stats .num { font-size: 22px; font-weight: 600; }
   #stats .row { margin-bottom: 8px; }
-  #reset {
+  .ctrl-btn {
     margin-top: 6px;
     padding: 6px 14px;
     background: #334155;
@@ -47,9 +45,18 @@
     font-size: 12px;
     cursor: pointer;
     font-weight: 500;
+    margin-left: 6px;
   }
-  #reset:hover { background: #475569; }
-  canvas { display: block; cursor: pointer; }
+  .ctrl-btn:hover { background: #475569; }
+  #zoom-controls {
+    position: fixed;
+    bottom: 16px;
+    right: 16px;
+    display: flex;
+    gap: 6px;
+    z-index: 10;
+  }
+  #zoom-controls .ctrl-btn { margin: 0; font-size: 16px; padding: 8px 14px; }
   #modal {
     position: fixed;
     inset: 0;
@@ -70,16 +77,8 @@
     max-width: 400px;
     box-shadow: 0 20px 50px rgba(0,0,0,0.5);
   }
-  #modal-card h2 {
-    font-size: 18px;
-    margin-bottom: 4px;
-    font-weight: 600;
-  }
-  #modal-card .from {
-    font-size: 12px;
-    opacity: 0.6;
-    margin-bottom: 18px;
-  }
+  #modal-card h2 { font-size: 18px; margin-bottom: 4px; font-weight: 600; }
+  #modal-card .from { font-size: 12px; opacity: 0.6; margin-bottom: 18px; }
   #modal-card .cost-line {
     background: #0f172a;
     padding: 14px 18px;
@@ -96,22 +95,9 @@
     color: #fbbf24;
     font-variant-numeric: tabular-nums;
   }
-  #modal-card .distance {
-    font-size: 11px;
-    opacity: 0.5;
-    text-align: center;
-    margin-bottom: 18px;
-  }
+  #modal-card .distance { font-size: 11px; opacity: 0.5; text-align: center; margin-bottom: 18px; }
   .btns { display: flex; gap: 10px; }
-  .btn {
-    flex: 1;
-    padding: 12px 0;
-    border: none;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-  }
+  .btn { flex: 1; padding: 12px 0; border: none; border-radius: 8px; font-size: 14px; font-weight: 600; cursor: pointer; }
   .btn-accept { background: #22c55e; color: #052e16; }
   .btn-accept:hover { background: #16a34a; }
   .btn-cancel { background: #475569; color: #f1f5f9; }
@@ -122,8 +108,8 @@
 
 <div id="hud">
   <div id="left">
-    <div id="title">TBS — Drag-to-Research Tech Tree (prototype)</div>
-    <div id="subtitle">Drag from any green tech to any other tech. Distance = cost.</div>
+    <div id="title">TBS — Drag-to-Research Tech Tree</div>
+    <div id="subtitle">Drag from a green node to any tech. Distance = cost. Pinch / mouse-wheel to zoom. Two-finger drag to pan.</div>
   </div>
   <div id="right">
     <div id="stats">
@@ -133,14 +119,20 @@
       </div>
       <div class="row">
         <div class="label">RESEARCHED</div>
-        <div class="num" id="owned-count">5</div>
+        <div class="num" id="owned-count">0</div>
       </div>
-      <button id="reset">RESET</button>
+      <button class="ctrl-btn" id="reset">RESET</button>
     </div>
   </div>
 </div>
 
 <canvas id="c"></canvas>
+
+<div id="zoom-controls">
+  <button class="ctrl-btn" id="zoom-out">−</button>
+  <button class="ctrl-btn" id="zoom-fit">FIT</button>
+  <button class="ctrl-btn" id="zoom-in">+</button>
+</div>
 
 <div id="modal">
   <div id="modal-card">
@@ -161,16 +153,20 @@
 <script>
 "use strict";
 
-// Polytopia tech tree (Path of the Ocean ruleset). 5 starting techs at
-// tier 1, each unlocks 2 tier-2 children, each of those unlocks 1
-// tier-3 grandchild. 5 + 10 + 10 = 25 techs total.
+// ── Tech data ─────────────────────────────────────────────────────────
+// Polytopia tree (Path-of-the-Ocean) + a synthetic 'origin' seed node at
+// the center. Player starts with ONLY the origin owned; everything else
+// must be researched by drag.
+const ORIGIN_ID = 'origin';
 const TECHS = [
-  // Tier 1 (starting — free, all owned at start)
-  { id: 'climbing',     name: 'Climbing',     tier: 1, parent: null },
-  { id: 'fishing',      name: 'Fishing',      tier: 1, parent: null },
-  { id: 'hunting',      name: 'Hunting',      tier: 1, parent: null },
-  { id: 'organization', name: 'Organization', tier: 1, parent: null },
-  { id: 'riding',       name: 'Riding',       tier: 1, parent: null },
+  { id: ORIGIN_ID, name: 'Origin', tier: 0, parent: null, isOrigin: true },
+
+  // Tier 1
+  { id: 'climbing',     name: 'Climbing',     tier: 1, parent: ORIGIN_ID },
+  { id: 'fishing',      name: 'Fishing',      tier: 1, parent: ORIGIN_ID },
+  { id: 'hunting',      name: 'Hunting',      tier: 1, parent: ORIGIN_ID },
+  { id: 'organization', name: 'Organization', tier: 1, parent: ORIGIN_ID },
+  { id: 'riding',       name: 'Riding',       tier: 1, parent: ORIGIN_ID },
 
   // Tier 2
   { id: 'mining',      name: 'Mining',      tier: 2, parent: 'climbing' },
@@ -197,106 +193,148 @@ const TECHS = [
   { id: 'chivalry',     name: 'Chivalry',     tier: 3, parent: 'freespirit' },
 ];
 
-// ── Layout ─────────────────────────────────────────────────────────────
-// Radial: T1 in inner ring; T2s fan out from their T1; T3s fan out from
-// their T2. Built once on resize.
-const RING_RADII = { 1: 0.16, 2: 0.34, 3: 0.50 }; // fraction of min(W,H)
-const NODE_RADIUS = 36;
+// World-coordinate ring radii. Big and spread out — pinch-zoom is the
+// navigation mechanism. T2 ring is rotated by half a T1-slot to offset
+// it angularly from T1; T3 ring is offset back so it's between T2 nodes.
+// Gives clearer line-of-sight when dragging across the tree.
+const RING_R = { 0: 0, 1: 280, 2: 560, 3: 840 };
+const NODE_RADIUS = 50;
+const NODE_RADIUS_ORIGIN = 60;
 
-let canvas, ctx, W, H, CX, CY;
+// View transform (pan + zoom). World coords are independent of viewport.
+let scale = 1, panX = 0, panY = 0;
+
+let canvas, ctx;
 
 function layout() {
-  canvas.width = W = window.innerWidth * devicePixelRatio;
-  canvas.height = H = window.innerHeight * devicePixelRatio;
-  canvas.style.width = window.innerWidth + 'px';
-  canvas.style.height = window.innerHeight + 'px';
-  ctx.scale(devicePixelRatio, devicePixelRatio);
-  CX = window.innerWidth / 2;
-  CY = window.innerHeight / 2;
-
-  const minDim = Math.min(window.innerWidth, window.innerHeight);
-
-  // T1: 5 evenly around the inner ring
-  const t1Tech = TECHS.filter(t => t.tier === 1);
-  t1Tech.forEach((t, i) => {
-    const angle = (i / t1Tech.length) * Math.PI * 2 - Math.PI / 2;
-    t._angle = angle;
-    t.x = CX + Math.cos(angle) * minDim * RING_RADII[1];
-    t.y = CY + Math.sin(angle) * minDim * RING_RADII[1];
+  // Origin at world (0,0). Sets node positions in world coordinates.
+  TECHS.forEach(t => {
+    if (t.isOrigin) { t.x = 0; t.y = 0; return; }
   });
 
-  // T2: each T1 has 2 children; fan them ±18° from parent angle
+  // T1: 5 evenly around the origin, rotated so first one is at top
+  const t1Tech = TECHS.filter(t => t.tier === 1);
+  const t1Step = (Math.PI * 2) / t1Tech.length;
+  t1Tech.forEach((t, i) => {
+    const angle = i * t1Step - Math.PI / 2;
+    t._angle = angle;
+    t.x = Math.cos(angle) * RING_R[1];
+    t.y = Math.sin(angle) * RING_R[1];
+  });
+
+  // T2: each T1 has 2 children. Offset them ±half-slot from parent
+  // angle. The half-slot is t1Step/4 — wide enough that lines drawn
+  // T1→neighbor's-T2 don't slice through your own T2s.
+  const halfSlot = t1Step / 4;
   t1Tech.forEach(parent => {
     const children = TECHS.filter(t => t.parent === parent.id);
     children.forEach((c, j) => {
-      const offset = (j - (children.length - 1) / 2) * (Math.PI / 10);
+      const offset = (j === 0 ? -halfSlot : halfSlot);
       const angle = parent._angle + offset;
       c._angle = angle;
-      c.x = CX + Math.cos(angle) * minDim * RING_RADII[2];
-      c.y = CY + Math.sin(angle) * minDim * RING_RADII[2];
+      c.x = Math.cos(angle) * RING_R[2];
+      c.y = Math.sin(angle) * RING_R[2];
     });
   });
 
-  // T3: each T2 has 1 child; extend directly outward from parent angle
+  // T3: each T2 has 1 child, extend angularly outward from parent's angle
   const t2 = TECHS.filter(t => t.tier === 2);
   t2.forEach(parent => {
     const child = TECHS.find(t => t.parent === parent.id);
     if (!child) return;
     child._angle = parent._angle;
-    child.x = CX + Math.cos(parent._angle) * minDim * RING_RADII[3];
-    child.y = CY + Math.sin(parent._angle) * minDim * RING_RADII[3];
+    child.x = Math.cos(parent._angle) * RING_R[3];
+    child.y = Math.sin(parent._angle) * RING_R[3];
   });
 }
 
-// ── State ──────────────────────────────────────────────────────────────
+// ── State ─────────────────────────────────────────────────────────────
 let owned = new Set();
 let spent = 0;
+let drag = null;    // { fromTech, pointerWorldX, pointerWorldY, hoverTech }
+let pending = null; // { from, to, cost }
 
-// Drag state
-let drag = null; // { fromTech, pointerX, pointerY, hoverTech }
-
-// Cost formula — tweakable. Distance is in screen pixels.
-// Math.round(distance / 4) feels right at typical screen sizes:
-//   short jump (parent → child same ring): ~25 ★
-//   long jump (T1 across to T3 far side): ~100 ★
 function costFor(fromTech, toTech) {
   const dx = fromTech.x - toTech.x;
   const dy = fromTech.y - toTech.y;
   const dist = Math.sqrt(dx*dx + dy*dy);
-  return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 4)) };
+  return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 8)) };
 }
 
 function reset() {
   owned.clear();
-  TECHS.filter(t => t.tier === 1).forEach(t => owned.add(t.id));
+  owned.add(ORIGIN_ID);
   spent = 0;
+  fitToView();
   updateHUD();
   draw();
 }
 
 function updateHUD() {
   document.getElementById('spent').textContent = spent;
-  document.getElementById('owned-count').textContent = owned.size;
+  // Don't count the synthetic Origin in "researched"
+  const realCount = [...owned].filter(id => id !== ORIGIN_ID).length;
+  document.getElementById('owned-count').textContent = realCount;
 }
 
-// ── Rendering ──────────────────────────────────────────────────────────
-function draw() {
-  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+// ── View transform helpers ────────────────────────────────────────────
+function screenToWorld(sx, sy) {
+  return { x: (sx - panX) / scale, y: (sy - panY) / scale };
+}
+function worldToScreen(wx, wy) {
+  return { x: wx * scale + panX, y: wy * scale + panY };
+}
 
-  // Background hex pattern (subtle)
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.04)';
-  ctx.lineWidth = 1;
-  for (let r = 60; r < Math.max(window.innerWidth, window.innerHeight); r += 80) {
+function fitToView() {
+  // Pick scale so the whole T3 ring + node radius fits within ~90% of the
+  // smaller viewport dimension, centered.
+  const margin = 80;
+  const dim = Math.min(window.innerWidth, window.innerHeight);
+  const target = dim - 2 * margin;
+  const treeDiameter = (RING_R[3] + NODE_RADIUS) * 2;
+  scale = Math.min(1, target / treeDiameter);
+  panX = window.innerWidth / 2;
+  panY = window.innerHeight / 2;
+}
+
+function zoomAt(sx, sy, factor) {
+  // Zoom keeping the (sx, sy) screen point fixed
+  const w = screenToWorld(sx, sy);
+  scale = Math.max(0.2, Math.min(4, scale * factor));
+  panX = sx - w.x * scale;
+  panY = sy - w.y * scale;
+  draw();
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────
+function resizeCanvas() {
+  canvas.width = window.innerWidth * devicePixelRatio;
+  canvas.height = window.innerHeight * devicePixelRatio;
+  canvas.style.width = window.innerWidth + 'px';
+  canvas.style.height = window.innerHeight + 'px';
+}
+
+function draw() {
+  ctx.setTransform(devicePixelRatio, 0, 0, devicePixelRatio, 0, 0);
+  ctx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+  ctx.translate(panX, panY);
+  ctx.scale(scale, scale);
+
+  // Faint ring guides
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.06)';
+  ctx.lineWidth = 1 / scale;
+  for (const r of [RING_R[1], RING_R[2], RING_R[3]]) {
     ctx.beginPath();
-    ctx.arc(CX, CY, r, 0, Math.PI * 2);
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
     ctx.stroke();
   }
 
-  // Faint parent → child guide lines
-  ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
-  ctx.lineWidth = 1;
+  // Faint parent → child guide lines (skip lines from Origin since
+  // every T1 has Origin as parent — would make a mess)
+  ctx.strokeStyle = 'rgba(148, 163, 184, 0.10)';
+  ctx.lineWidth = 1 / scale;
   TECHS.forEach(t => {
-    if (t.parent) {
+    if (t.parent && t.parent !== ORIGIN_ID) {
       const p = TECHS.find(x => x.id === t.parent);
       ctx.beginPath();
       ctx.moveTo(p.x, p.y);
@@ -305,40 +343,35 @@ function draw() {
     }
   });
 
-  // Drag line (if dragging)
+  // Drag line
   if (drag) {
     const hover = drag.hoverTech;
-    const targetX = hover ? hover.x : drag.pointerX;
-    const targetY = hover ? hover.y : drag.pointerY;
-
-    // Cost preview color: green if affordable / valid, amber otherwise
+    const tx = hover ? hover.x : drag.pointerWorldX;
+    const ty = hover ? hover.y : drag.pointerWorldY;
     const valid = hover && !owned.has(hover.id);
     ctx.strokeStyle = valid ? '#fbbf24' : 'rgba(251, 191, 36, 0.4)';
-    ctx.lineWidth = 3;
-    ctx.setLineDash([8, 4]);
+    ctx.lineWidth = 3 / scale;
+    ctx.setLineDash([8 / scale, 4 / scale]);
     ctx.beginPath();
     ctx.moveTo(drag.fromTech.x, drag.fromTech.y);
-    ctx.lineTo(targetX, targetY);
+    ctx.lineTo(tx, ty);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // Live cost label at midpoint
-    if (hover && !owned.has(hover.id)) {
-      const { cost, dist } = costFor(drag.fromTech, hover);
+    if (valid) {
+      const { cost } = costFor(drag.fromTech, hover);
       const mx = (drag.fromTech.x + hover.x) / 2;
       const my = (drag.fromTech.y + hover.y) / 2;
-      ctx.font = 'bold 16px -apple-system';
-      ctx.fillStyle = '#0f172a';
-      ctx.strokeStyle = '#fbbf24';
-      ctx.lineWidth = 6;
-      const label = `${cost} ★`;
-      const tw = ctx.measureText(label).width;
-      ctx.beginPath();
-      ctx.roundRect(mx - tw/2 - 10, my - 14, tw + 20, 28, 14);
+      const labelW = 80 / scale, labelH = 30 / scale;
       ctx.fillStyle = '#fbbf24';
+      ctx.beginPath();
+      ctx.roundRect(mx - labelW/2, my - labelH/2, labelW, labelH, 12 / scale);
       ctx.fill();
       ctx.fillStyle = '#0f172a';
-      ctx.fillText(label, mx - tw/2, my + 5);
+      ctx.font = `bold ${18/scale}px -apple-system`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cost + ' ★', mx, my);
     }
   }
 
@@ -347,144 +380,196 @@ function draw() {
     const isOwned = owned.has(t.id);
     const isHovered = drag && drag.hoverTech && drag.hoverTech.id === t.id && !isOwned;
     const isSource = drag && drag.fromTech.id === t.id;
+    const r = t.isOrigin ? NODE_RADIUS_ORIGIN : NODE_RADIUS;
 
-    // Tier ring (outer)
+    // Outer ring
     ctx.beginPath();
-    ctx.arc(t.x, t.y, NODE_RADIUS + 4, 0, Math.PI * 2);
-    if (isOwned) {
+    ctx.arc(t.x, t.y, r + 5, 0, Math.PI * 2);
+    if (t.isOrigin) {
+      ctx.fillStyle = '#22c55e';
+    } else if (isOwned) {
       ctx.fillStyle = '#22c55e';
     } else if (isHovered) {
       ctx.fillStyle = '#fbbf24';
     } else {
       ctx.fillStyle = ['', '#3b82f6', '#8b5cf6', '#ec4899'][t.tier] || '#64748b';
     }
-    ctx.globalAlpha = isSource ? 1 : (isOwned ? 1 : 0.6);
+    ctx.globalAlpha = isSource ? 1 : (isOwned ? 1 : 0.65);
     ctx.fill();
 
     // Inner fill
     ctx.beginPath();
-    ctx.arc(t.x, t.y, NODE_RADIUS, 0, Math.PI * 2);
-    ctx.fillStyle = isOwned ? '#15803d' : '#1e293b';
+    ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+    ctx.fillStyle = t.isOrigin || isOwned ? '#15803d' : '#1e293b';
     ctx.globalAlpha = 1;
     ctx.fill();
 
-    // Tier number badge
-    ctx.font = 'bold 11px -apple-system';
-    ctx.fillStyle = isOwned ? '#bbf7d0' : 'rgba(226, 232, 240, 0.5)';
-    const tierTxt = 'T' + t.tier;
-    const ttw = ctx.measureText(tierTxt).width;
-    ctx.fillText(tierTxt, t.x - ttw/2, t.y - 6);
-
-    // Tech name
-    ctx.font = 'bold 12px -apple-system';
-    ctx.fillStyle = isOwned ? '#ffffff' : '#e2e8f0';
-    const name = t.name;
-    const nw = ctx.measureText(name).width;
-    if (nw > NODE_RADIUS * 1.7) {
-      // Two-line if too long
-      const parts = name.split(' ');
-      if (parts.length >= 2) {
-        const top = parts[0];
-        const bot = parts.slice(1).join(' ');
-        const tw1 = ctx.measureText(top).width;
-        const tw2 = ctx.measureText(bot).width;
-        ctx.fillText(top, t.x - tw1/2, t.y + 8);
-        ctx.fillText(bot, t.x - tw2/2, t.y + 22);
-      } else {
-        // Force shrink
-        ctx.font = 'bold 10px -apple-system';
-        const nw2 = ctx.measureText(name).width;
-        ctx.fillText(name, t.x - nw2/2, t.y + 12);
-      }
-    } else {
-      ctx.fillText(name, t.x - nw/2, t.y + 12);
+    // Tier badge (skip for origin)
+    if (!t.isOrigin) {
+      ctx.font = `bold ${14}px -apple-system`;
+      ctx.fillStyle = isOwned ? '#bbf7d0' : 'rgba(226, 232, 240, 0.55)';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('T' + t.tier, t.x, t.y - 14);
     }
+
+    // Name
+    ctx.font = `bold ${t.isOrigin ? 18 : 15}px -apple-system`;
+    ctx.fillStyle = t.isOrigin || isOwned ? '#ffffff' : '#e2e8f0';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const yShift = t.isOrigin ? 4 : 8;
+    ctx.fillText(t.name, t.x, t.y + yShift);
   });
 }
 
-// ── Input ──────────────────────────────────────────────────────────────
-function getPointerPos(e) {
-  const r = canvas.getBoundingClientRect();
-  const t = e.touches ? e.touches[0] : e;
-  return { x: t.clientX - r.left, y: t.clientY - r.top };
-}
-
-function techAt(x, y) {
+// ── Hit testing ───────────────────────────────────────────────────────
+function techAtScreen(sx, sy) {
+  const w = screenToWorld(sx, sy);
   for (const t of TECHS) {
-    const dx = x - t.x;
-    const dy = y - t.y;
-    if (dx*dx + dy*dy <= (NODE_RADIUS + 4) * (NODE_RADIUS + 4)) return t;
+    const dx = w.x - t.x;
+    const dy = w.y - t.y;
+    const r = (t.isOrigin ? NODE_RADIUS_ORIGIN : NODE_RADIUS) + 5;
+    if (dx*dx + dy*dy <= r*r) return t;
   }
   return null;
 }
 
-function onDown(e) {
-  e.preventDefault();
-  const p = getPointerPos(e);
-  const t = techAt(p.x, p.y);
+// ── Input — mouse ─────────────────────────────────────────────────────
+canvas.addEventListener?.('mousedown', () => {}); // for type safety in some browsers
+
+function onMouseDown(e) {
+  if (e.button !== 0) return;
+  const t = techAtScreen(e.clientX, e.clientY);
   if (!t || !owned.has(t.id)) return;
-  drag = { fromTech: t, pointerX: p.x, pointerY: p.y, hoverTech: null };
+  const w = screenToWorld(e.clientX, e.clientY);
+  drag = { fromTech: t, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
   draw();
 }
 
-function onMove(e) {
+function onMouseMove(e) {
   if (!drag) return;
-  e.preventDefault();
-  const p = getPointerPos(e);
-  drag.pointerX = p.x;
-  drag.pointerY = p.y;
-  const t = techAt(p.x, p.y);
+  const w = screenToWorld(e.clientX, e.clientY);
+  drag.pointerWorldX = w.x;
+  drag.pointerWorldY = w.y;
+  const t = techAtScreen(e.clientX, e.clientY);
   drag.hoverTech = (t && !owned.has(t.id) && t.id !== drag.fromTech.id) ? t : null;
   draw();
 }
 
-function onUp(e) {
+function onMouseUp() {
   if (!drag) return;
-  e.preventDefault();
-  const hover = drag.hoverTech;
-  if (hover && !owned.has(hover.id)) {
-    openModal(drag.fromTech, hover);
-  }
+  if (drag.hoverTech && !owned.has(drag.hoverTech.id)) openModal(drag.fromTech, drag.hoverTech);
   drag = null;
   draw();
 }
 
-// ── Modal ──────────────────────────────────────────────────────────────
-let pending = null;
-
-function openModal(from, to) {
-  const { cost, dist } = costFor(from, to);
-  pending = { from, to, cost };
-  document.getElementById('modal-title').textContent = 'Research ' + to.name;
-  document.getElementById('modal-from').textContent = 'From ' + from.name + ' (Tier ' + to.tier + ')';
-  document.getElementById('modal-cost').textContent = cost + ' ★';
-  document.getElementById('modal-distance').textContent = 'distance: ' + dist + ' px';
-  document.getElementById('modal').classList.add('open');
+function onWheel(e) {
+  e.preventDefault();
+  const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+  zoomAt(e.clientX, e.clientY, factor);
 }
 
+// ── Input — touch ─────────────────────────────────────────────────────
+// 1 finger: research drag.
+// 2 fingers: pinch + pan (drag is cancelled when a second finger lands).
+let touches = []; // { id, x, y }
+let pinchState = null; // { initDist, initScale, initMid, initPan: {x,y} }
+
+function getTouchById(id) { return touches.find(t => t.id === id); }
+function dist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
+function midOf(a, b) { return { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 }; }
+
+function onTouchStart(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    touches.push({ id: t.identifier, x: t.clientX, y: t.clientY });
+  }
+  if (touches.length === 1) {
+    // start research drag
+    const t = touches[0];
+    const tech = techAtScreen(t.x, t.y);
+    if (tech && owned.has(tech.id)) {
+      const w = screenToWorld(t.x, t.y);
+      drag = { fromTech: tech, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
+      draw();
+    }
+  } else if (touches.length >= 2) {
+    // start pinch — cancel any in-progress drag
+    drag = null;
+    pinchState = {
+      initDist: dist(touches[0], touches[1]),
+      initScale: scale,
+      initMid: midOf(touches[0], touches[1]),
+      initPan: { x: panX, y: panY },
+    };
+    draw();
+  }
+}
+
+function onTouchMove(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const cur = getTouchById(t.identifier);
+    if (cur) { cur.x = t.clientX; cur.y = t.clientY; }
+  }
+  if (touches.length === 1 && drag) {
+    const w = screenToWorld(touches[0].x, touches[0].y);
+    drag.pointerWorldX = w.x;
+    drag.pointerWorldY = w.y;
+    const t = techAtScreen(touches[0].x, touches[0].y);
+    drag.hoverTech = (t && !owned.has(t.id) && t.id !== drag.fromTech.id) ? t : null;
+    draw();
+  } else if (touches.length >= 2 && pinchState) {
+    const newDist = dist(touches[0], touches[1]);
+    const newMid = midOf(touches[0], touches[1]);
+    const newScale = Math.max(0.2, Math.min(4, pinchState.initScale * (newDist / pinchState.initDist)));
+    // Convert pinch midpoint (screen) to its world position at initial scale,
+    // keep that world point under the new midpoint.
+    const initWorldMid = {
+      x: (pinchState.initMid.x - pinchState.initPan.x) / pinchState.initScale,
+      y: (pinchState.initMid.y - pinchState.initPan.y) / pinchState.initScale,
+    };
+    scale = newScale;
+    panX = newMid.x - initWorldMid.x * scale;
+    panY = newMid.y - initWorldMid.y * scale;
+    draw();
+  }
+}
+
+function onTouchEnd(e) {
+  e.preventDefault();
+  for (const t of e.changedTouches) {
+    const idx = touches.findIndex(x => x.id === t.identifier);
+    if (idx >= 0) touches.splice(idx, 1);
+  }
+  if (touches.length < 2) pinchState = null;
+  if (touches.length === 0 && drag) {
+    if (drag.hoverTech && !owned.has(drag.hoverTech.id)) openModal(drag.fromTech, drag.hoverTech);
+    drag = null;
+    draw();
+  }
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────
+function openModal(from, to) {
+  const { cost, dist: d } = costFor(from, to);
+  pending = { from, to, cost };
+  document.getElementById('modal-title').textContent = 'Research ' + to.name;
+  document.getElementById('modal-from').textContent = 'From ' + from.name + (to.tier ? ' → Tier ' + to.tier : '');
+  document.getElementById('modal-cost').textContent = cost + ' ★';
+  document.getElementById('modal-distance').textContent = 'distance: ' + d + ' world-px';
+  document.getElementById('modal').classList.add('open');
+}
 function closeModal() {
   document.getElementById('modal').classList.remove('open');
   pending = null;
 }
 
-document.getElementById('btn-accept').addEventListener('click', () => {
-  if (!pending) return;
-  owned.add(pending.to.id);
-  spent += pending.cost;
-  updateHUD();
-  closeModal();
-  draw();
-});
-
-document.getElementById('btn-cancel').addEventListener('click', closeModal);
-
-document.getElementById('reset').addEventListener('click', reset);
-
-// ── Bootstrap ──────────────────────────────────────────────────────────
+// ── Bootstrap ─────────────────────────────────────────────────────────
 function init() {
   canvas = document.getElementById('c');
   ctx = canvas.getContext('2d');
-  // Polyfill roundRect for older browsers
   if (!ctx.roundRect) {
     ctx.roundRect = function(x, y, w, h, r) {
       this.beginPath();
@@ -500,17 +585,38 @@ function init() {
       this.closePath();
     };
   }
+  resizeCanvas();
   layout();
   reset();
 
-  canvas.addEventListener('mousedown', onDown);
-  canvas.addEventListener('mousemove', onMove);
-  canvas.addEventListener('mouseup', onUp);
-  canvas.addEventListener('touchstart', onDown, { passive: false });
-  canvas.addEventListener('touchmove', onMove, { passive: false });
-  canvas.addEventListener('touchend', onUp, { passive: false });
+  // Mouse
+  canvas.addEventListener('mousedown', onMouseDown);
+  window.addEventListener('mousemove', onMouseMove);
+  window.addEventListener('mouseup', onMouseUp);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
 
-  window.addEventListener('resize', () => { layout(); draw(); });
+  // Touch
+  canvas.addEventListener('touchstart', onTouchStart, { passive: false });
+  canvas.addEventListener('touchmove', onTouchMove, { passive: false });
+  canvas.addEventListener('touchend', onTouchEnd, { passive: false });
+  canvas.addEventListener('touchcancel', onTouchEnd, { passive: false });
+
+  // Buttons
+  document.getElementById('btn-accept').addEventListener('click', () => {
+    if (!pending) return;
+    owned.add(pending.to.id);
+    spent += pending.cost;
+    updateHUD();
+    closeModal();
+    draw();
+  });
+  document.getElementById('btn-cancel').addEventListener('click', closeModal);
+  document.getElementById('reset').addEventListener('click', reset);
+  document.getElementById('zoom-in').addEventListener('click', () => zoomAt(window.innerWidth/2, window.innerHeight/2, 1.25));
+  document.getElementById('zoom-out').addEventListener('click', () => zoomAt(window.innerWidth/2, window.innerHeight/2, 1/1.25));
+  document.getElementById('zoom-fit').addEventListener('click', () => { fitToView(); draw(); });
+
+  window.addEventListener('resize', () => { resizeCanvas(); draw(); });
 }
 
 init();
