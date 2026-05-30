@@ -357,6 +357,17 @@ function tileDefenseBonus(tile) {
   return tile.type.defenseBonus;
 }
 
+// GDD §2.6 healing helper: "own territory" = own village OR a tile within
+// hex-distance 1 of an owned village (the 1-tile ring).
+function isOwnTerritory(state, q, r, playerId) {
+  for (const t of state.map.tiles) {
+    if (!t.hasVillage) continue;
+    if (t.ownerPlayer !== playerId) continue;
+    if (hexDistance(t.q, t.r, q, r) <= 1) return true;
+  }
+  return false;
+}
+
 // SC2-style fog of war (per doc 10 §2.1.1):
 //   Terrain & village positions = always public.
 //   Enemy units = visible only when within vision radius of an own unit or
@@ -603,6 +614,18 @@ function endTurn(state) {
     } else if (v && v.ownerPlayer === null) {
       v.ownerPlayer = u.player;
     }
+  }
+  // Healing per GDD §2.6: each active-player unit that did NOT move AND
+  // did NOT attack heals +4 HP on own-territory tiles (own village or its
+  // 1-tile ring), +2 elsewhere. Cap at maxHp.
+  // Predicate "didn't move/attack" = !hasMovedThisTurn && canAttack.
+  for (const u of state.units) {
+    if (u.player !== state.currentPlayer) continue;
+    if (u.hasMovedThisTurn || !u.canAttack) continue;
+    const maxHp = UNIT_STATS[u.type].hp;
+    if (u.hp >= maxHp) continue;
+    const heal = isOwnTerritory(state, u.q, u.r, u.player) ? 4 : 2;
+    u.hp = Math.min(maxHp, u.hp + heal);
   }
   // Check win: own at least one village and opponent owns none.
   for (let p = 0; p < 2; p++) {
