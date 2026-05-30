@@ -364,21 +364,21 @@ function tileDefenseBonus(tile) {
 function visibilityForPlayer(state, playerId) {
   const visible = new Set();
   const add = (q, r) => visible.add(`${q},${r}`);
-  // Own villages (and their immediate ring)
+  // Own villages — capital gets radius 2, all others radius 1.
   for (const t of state.map.tiles) {
     if (t.hasVillage && t.ownerPlayer === playerId) {
-      add(t.q, t.r);
-      for (const n of neighborsOf(t.q, t.r)) add(n.q, n.r);
+      const r = t.isCapital ? 2 : 1;
+      for (const tt of state.map.tiles) {
+        if (hexDistance(t.q, t.r, tt.q, tt.r) <= r) add(tt.q, tt.r);
+      }
     }
   }
-  // Own units (and their immediate ring)
+  // Own units — radius 1, or 2 if standing on a mountain (per GDD §2.6).
   for (const u of state.units) {
     if (u.player === playerId) {
-      add(u.q, u.r);
-      const radius = state.tileAt(u.q, u.r).type === TILE.MOUNTAIN ? 2 : 1;
-      // BFS by hex distance
+      const r = state.tileAt(u.q, u.r).type === TILE.MOUNTAIN ? 2 : 1;
       for (const t of state.map.tiles) {
-        if (hexDistance(u.q, u.r, t.q, t.r) <= radius) add(t.q, t.r);
+        if (hexDistance(u.q, u.r, t.q, t.r) <= r) add(t.q, t.r);
       }
     }
   }
@@ -439,7 +439,7 @@ function generateMap(seed, radius) {
     const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
-    return { q, r, type, hasVillage: false, ownerPlayer: null };
+    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false };
   });
 
   // Villages on plains
@@ -455,16 +455,24 @@ function generateMap(seed, radius) {
     if (ok) { villages.push(c); c.hasVillage = true; }
   }
 
-  // Pick the two most-distant villages as P1 and P2 starts.
+  // Pick the two most-distant villages as P1 and P2 capitals.
+  // Capital constraint: at least 2 tiles in from the board edge so neither
+  // player spawns on the border. If no candidate qualifies (very small map
+  // or pathological gen), fall back to the unfiltered village list.
+  const capitalPool = villages.filter(v => {
+    const s = -v.q - v.r;
+    return Math.max(Math.abs(v.q), Math.abs(v.r), Math.abs(s)) <= radius - 2;
+  });
+  const pool = capitalPool.length >= 2 ? capitalPool : villages;
   let p1V = null, p2V = null, best = -1;
-  for (let i = 0; i < villages.length; i++) {
-    for (let j = i + 1; j < villages.length; j++) {
-      const d = hexDistance(villages[i].q, villages[i].r, villages[j].q, villages[j].r);
-      if (d > best) { best = d; p1V = villages[i]; p2V = villages[j]; }
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      const d = hexDistance(pool[i].q, pool[i].r, pool[j].q, pool[j].r);
+      if (d > best) { best = d; p1V = pool[i]; p2V = pool[j]; }
     }
   }
-  if (p1V) p1V.ownerPlayer = 0;
-  if (p2V) p2V.ownerPlayer = 1;
+  if (p1V) { p1V.ownerPlayer = 0; p1V.isCapital = true; }
+  if (p2V) { p2V.ownerPlayer = 1; p2V.isCapital = true; }
 
   return { radius, tiles, seed };
 }
