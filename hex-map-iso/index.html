@@ -555,6 +555,10 @@ function moveUnit(state, unit, toQ, toR) {
 function attackUnit(state, attacker, defender) {
   if (attacker.player !== state.currentPlayer) return null;
   if (!attacker.canAttack) return null;
+  // Vision check (GDD §2.6): ranged units must verify target visibility
+  // before firing. Matches server attack() in rules.ts.
+  const vis = visibilityForPlayer(state, attacker.player);
+  if (!isVisible(vis, defender.q, defender.r)) return null;
   const dist = hexDistance(attacker.q, attacker.r, defender.q, defender.r);
   if (dist > UNIT_STATS[attacker.type].range) return null;
   const defTile = state.tileAt(defender.q, defender.r);
