@@ -267,49 +267,14 @@ let connections = []; // [{ fromId, toId }, ...] research lines drawn green afte
 let drag = null;    // { fromTech, pointerWorldX, pointerWorldY, hoverTech }
 let pending = null; // { from, to, cost }
 
-// Find the tree path between two techs (the tree's edges are
-// parent→child relationships). Returns an ordered array of techs from
-// `fromTech` to `toTech` inclusive, or null if disconnected (shouldn't
-// happen in a connected tree). Implementation: walk both nodes up to
-// their lowest common ancestor.
-function pathBetween(fromTech, toTech) {
-  function ancestorsOf(t) {
-    const chain = [];
-    let cur = t;
-    while (cur) {
-      chain.push(cur);
-      cur = cur.parent ? TECHS.find(x => x.id === cur.parent) : null;
-    }
-    return chain; // index 0 = self, last = origin
-  }
-  const fromChain = ancestorsOf(fromTech);
-  const toChain = ancestorsOf(toTech);
-  const fromSet = new Set(fromChain.map(t => t.id));
-  const lca = toChain.find(t => fromSet.has(t.id));
-  if (!lca) return null;
-  const upFromFrom = [];
-  for (const t of fromChain) {
-    upFromFrom.push(t);
-    if (t.id === lca.id) break;
-  }
-  const downToTo = [];
-  for (const t of toChain) {
-    if (t.id === lca.id) break;
-    downToTo.push(t);
-  }
-  return [...upFromFrom, ...downToTo.reverse()];
-}
-
-// Compute the cost of researching everything from `fromTech` (owned)
-// toward `toTech`. Cost = sum of `cost` for each UN-OWNED tech in the
-// path (we don't re-charge for techs already researched). Returns
-// { path, cost, newTechs } or null if no valid path.
+// Free-form drag cost: Euclidean distance between the two nodes in
+// world coordinates, scaled. Player draws from ANY owned tech to ANY
+// unowned tech — no constraint to the tree's parent-child edges.
 function costFor(fromTech, toTech) {
-  const path = pathBetween(fromTech, toTech);
-  if (!path || path.length < 2) return null;
-  const newTechs = path.filter(t => !owned.has(t.id));
-  const cost = newTechs.reduce((s, t) => s + (t.cost || 0), 0);
-  return { path, cost, newTechs };
+  const dx = fromTech.x - toTech.x;
+  const dy = fromTech.y - toTech.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 8)) };
 }
 
 function reset() {
@@ -428,8 +393,7 @@ function draw() {
     ctx.setLineDash([]);
 
     if (valid) {
-      const cf = costFor(drag.fromTech, hover);
-      const cost = cf ? cf.cost : 0;
+      const { cost } = costFor(drag.fromTech, hover);
       const mx = (drag.fromTech.x + hover.x) / 2;
       const my = (drag.fromTech.y + hover.y) / 2;
       const labelW = 80 / scale, labelH = 30 / scale;
@@ -622,18 +586,12 @@ function onTouchEnd(e) {
 
 // ── Modal ─────────────────────────────────────────────────────────────
 function openModal(from, to) {
-  const cf = costFor(from, to);
-  if (!cf) return;
-  pending = { from, to, cost: cf.cost, path: cf.path, newTechs: cf.newTechs };
+  const { cost, dist: d } = costFor(from, to);
+  pending = { from, to, cost };
   document.getElementById('modal-title').textContent = 'Research ' + to.name;
   document.getElementById('modal-from').textContent = 'From ' + from.name + (to.tier ? ' → Tier ' + to.tier : '');
-  document.getElementById('modal-cost').textContent = cf.cost + ' ★';
-  // Show the path the research will traverse — helps the player see
-  // what they're paying for when the source and target aren't adjacent.
-  const pathLabel = cf.path.map(t => owned.has(t.id) ? t.name + ' ✓' : t.name).join(' → ');
-  document.getElementById('modal-distance').textContent = cf.newTechs.length > 1
-    ? `Researches ${cf.newTechs.length} techs: ${pathLabel}`
-    : `Path: ${pathLabel}`;
+  document.getElementById('modal-cost').textContent = cost + ' ★';
+  document.getElementById('modal-distance').textContent = 'distance: ' + d + ' world-px';
   document.getElementById('modal').classList.add('open');
 }
 function closeModal() {
@@ -679,21 +637,9 @@ function init() {
   // Buttons
   document.getElementById('btn-accept').addEventListener('click', () => {
     if (!pending) return;
+    owned.add(pending.to.id);
     spent += pending.cost;
-    // Walk the path; mark every new tech as owned and draw a green
-    // edge for each newly-traversed step (pre-owned segments already
-    // have their connection lines).
-    for (let i = 0; i < pending.path.length - 1; i++) {
-      const a = pending.path[i];
-      const b = pending.path[i + 1];
-      const wasOwnedA = owned.has(a.id);
-      const wasOwnedB = owned.has(b.id);
-      owned.add(a.id);
-      owned.add(b.id);
-      if (!wasOwnedA || !wasOwnedB) {
-        connections.push({ fromId: a.id, toId: b.id });
-      }
-    }
+    connections.push({ fromId: pending.from.id, toId: pending.to.id });
     updateHUD();
     closeModal();
     draw();
