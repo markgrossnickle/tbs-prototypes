@@ -267,14 +267,11 @@ let connections = []; // [{ fromId, toId }, ...] research lines drawn green afte
 let drag = null;    // { fromTech, pointerWorldX, pointerWorldY, hoverTech }
 let pending = null; // { from, to, cost }
 
-// Free-form drag cost: Euclidean distance in world coordinates. The
-// target can be a tech (research it) OR a free point on the canvas
-// (just draw a line there, no research). Either way, distance = cost.
-function costFor(fromTech, target) {
-  const tx = (target && target.x !== undefined) ? target.x : 0;
-  const ty = (target && target.y !== undefined) ? target.y : 0;
-  const dx = fromTech.x - tx;
-  const dy = fromTech.y - ty;
+// Free-form drag cost: Euclidean distance in world coordinates between
+// two endpoints (each has .x and .y; can be a tech or a free point).
+function costFor(src, target) {
+  const dx = src.x - target.x;
+  const dy = src.y - target.y;
   const dist = Math.sqrt(dx*dx + dy*dy);
   return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 8)) };
 }
@@ -368,77 +365,79 @@ function draw() {
   ctx.strokeStyle = '#22c55e';
   ctx.lineWidth = 4 / scale;
   ctx.lineCap = 'round';
+  // Connections may have tech endpoints (fromId/toId) or free-point
+  // endpoints (fromPoint/toPoint), in any combination. Resolve each
+  // side independently.
+  function endpointPos(idField, pointField, c) {
+    if (c[idField]) {
+      const t = TECHS.find(x => x.id === c[idField]);
+      return t ? { x: t.x, y: t.y } : null;
+    }
+    if (c[pointField]) return c[pointField];
+    return null;
+  }
   connections.forEach(c => {
-    const f = TECHS.find(x => x.id === c.fromId);
-    if (!f) return;
-    let endX, endY;
-    if (c.toId) {
-      const t = TECHS.find(x => x.id === c.toId);
-      if (!t) return;
-      endX = t.x; endY = t.y;
-    } else if (c.toPoint) {
-      endX = c.toPoint.x; endY = c.toPoint.y;
-    } else {
-      return;
-    }
+    const a = endpointPos('fromId', 'fromPoint', c);
+    const b = endpointPos('toId', 'toPoint', c);
+    if (!a || !b) return;
     ctx.beginPath();
-    ctx.moveTo(f.x, f.y);
-    ctx.lineTo(endX, endY);
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
     ctx.stroke();
-    // For free-line endpoints (no tech at the end), put a small green
-    // dot so the line clearly TERMINATES there rather than looking
-    // like a leak into empty space.
-    if (!c.toId) {
-      ctx.beginPath();
-      ctx.arc(endX, endY, 10 / scale, 0, Math.PI * 2);
-      ctx.fillStyle = '#22c55e';
-      ctx.fill();
-    }
   });
   ctx.lineCap = 'butt';
+
+  // Free-floating endpoint dots — drawn AFTER lines so they sit on top.
+  // Slightly larger + outlined so they read as draggable handles.
+  ctx.fillStyle = '#22c55e';
+  ctx.strokeStyle = '#86efac';
+  ctx.lineWidth = 2 / scale;
+  for (const ep of freeEndpoints()) {
+    ctx.beginPath();
+    ctx.arc(ep.x, ep.y, 14 / scale, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.stroke();
+  }
 
   // Drag line — shown for the whole drag (either landing on a tech or
   // ending in free canvas). Cost label always visible.
   if (drag) {
-    const hover = drag.hoverTech;
-    // Free-line is OK at any pointer position; research is OK when
-    // hovering an unowned tech. Visualized identically except the
-    // endpoint color cue.
-    const onValidTech = hover && !owned.has(hover.id);
-    const tx = hover ? hover.x : drag.pointerWorldX;
-    const ty = hover ? hover.y : drag.pointerWorldY;
-    const target = hover ? hover : { x: tx, y: ty };
-    ctx.strokeStyle = onValidTech ? '#fbbf24' : '#fbbf2488';
-    ctx.lineWidth = 3 / scale;
-    ctx.setLineDash([8 / scale, 4 / scale]);
-    ctx.beginPath();
-    ctx.moveTo(drag.fromTech.x, drag.fromTech.y);
-    ctx.lineTo(tx, ty);
-    ctx.stroke();
-    ctx.setLineDash([]);
+    const src = currentDragSource();
+    if (src) {
+      const hover = drag.hoverTech;
+      const onValidTech = hover && !owned.has(hover.id);
+      const tx = hover ? hover.x : drag.pointerWorldX;
+      const ty = hover ? hover.y : drag.pointerWorldY;
+      ctx.strokeStyle = onValidTech ? '#fbbf24' : '#fbbf2488';
+      ctx.lineWidth = 3 / scale;
+      ctx.setLineDash([8 / scale, 4 / scale]);
+      ctx.beginPath();
+      ctx.moveTo(src.x, src.y);
+      ctx.lineTo(tx, ty);
+      ctx.stroke();
+      ctx.setLineDash([]);
 
-    // Cost label at midpoint — always shown so the player knows what
-    // the spend would be before they release.
-    const { cost } = costFor(drag.fromTech, target);
-    const mx = (drag.fromTech.x + tx) / 2;
-    const my = (drag.fromTech.y + ty) / 2;
-    const labelW = 90 / scale, labelH = 30 / scale;
-    ctx.fillStyle = onValidTech ? '#fbbf24' : 'rgba(251, 191, 36, 0.9)';
-    ctx.beginPath();
-    ctx.roundRect(mx - labelW/2, my - labelH/2, labelW, labelH, 12 / scale);
-    ctx.fill();
-    ctx.fillStyle = '#0f172a';
-    ctx.font = `bold ${18/scale}px -apple-system`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(cost + ' ★', mx, my);
+      const { cost } = costFor(src, { x: tx, y: ty });
+      const mx = (src.x + tx) / 2;
+      const my = (src.y + ty) / 2;
+      const labelW = 90 / scale, labelH = 30 / scale;
+      ctx.fillStyle = onValidTech ? '#fbbf24' : 'rgba(251, 191, 36, 0.9)';
+      ctx.beginPath();
+      ctx.roundRect(mx - labelW/2, my - labelH/2, labelW, labelH, 12 / scale);
+      ctx.fill();
+      ctx.fillStyle = '#0f172a';
+      ctx.font = `bold ${18/scale}px -apple-system`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(cost + ' ★', mx, my);
+    }
   }
 
   // Nodes
   TECHS.forEach(t => {
     const isOwned = owned.has(t.id);
     const isHovered = drag && drag.hoverTech && drag.hoverTech.id === t.id && !isOwned;
-    const isSource = drag && drag.fromTech.id === t.id;
+    const isSource = drag && drag.fromTech && drag.fromTech.id === t.id;
     const r = t.isOrigin ? NODE_RADIUS_ORIGIN : NODE_RADIUS;
 
     // Outer ring
@@ -494,15 +493,92 @@ function techAtScreen(sx, sy) {
   return null;
 }
 
+// All free-floating endpoints from previous connections. Each can be
+// dragged from to extend further. Returns {x, y} world coords.
+function freeEndpoints() {
+  const result = [];
+  for (const c of connections) {
+    if (c.toPoint) result.push({ x: c.toPoint.x, y: c.toPoint.y });
+    if (c.fromPoint) result.push({ x: c.fromPoint.x, y: c.fromPoint.y });
+  }
+  return result;
+}
+
+function endpointAtScreen(sx, sy) {
+  const w = screenToWorld(sx, sy);
+  // Free endpoint hit radius is larger than the rendered dot so touch
+  // targets stay usable even at small render sizes.
+  const hitR = 22;
+  for (const e of freeEndpoints()) {
+    const dx = w.x - e.x;
+    const dy = w.y - e.y;
+    if (dx*dx + dy*dy <= hitR*hitR) return e;
+  }
+  return null;
+}
+
+// Drag source position (world coords) regardless of whether the source
+// is a tech or a free endpoint.
+function dragSourcePos() {
+  if (!drag) return null;
+  if (drag.fromTech) return { x: drag.fromTech.x, y: drag.fromTech.y };
+  if (drag.fromPoint) return drag.fromPoint;
+  return null;
+}
+
+function dragSourceLabel() {
+  if (!drag) return '';
+  if (drag.fromTech) return drag.fromTech.name;
+  return 'previous endpoint';
+}
+
 // ── Input — mouse ─────────────────────────────────────────────────────
+
+// Unified source/target endpoint objects: { x, y, name, tech, pointKey }
+// - tech (or null) — present when this endpoint is a tech node
+// - pointKey (or null) — string like "p:12.5,38.2" when this endpoint
+//   is a free point; used to track new connections coming from a
+//   previously-drawn endpoint
+function makeTechEndpoint(t) { return { x: t.x, y: t.y, name: t.name, tech: t, pointKey: null }; }
+function makePointEndpoint(p) { return { x: p.x, y: p.y, name: 'point', tech: null, pointKey: `p:${p.x.toFixed(1)},${p.y.toFixed(1)}` }; }
+
+function currentDragSource() {
+  if (!drag) return null;
+  if (drag.fromTech) return makeTechEndpoint(drag.fromTech);
+  if (drag.fromPoint) return makePointEndpoint(drag.fromPoint);
+  return null;
+}
+
+function resolveDragRelease() {
+  const src = currentDragSource();
+  if (!src) return;
+  if (drag.hoverTech && !owned.has(drag.hoverTech.id)) {
+    openModal(src, makeTechEndpoint(drag.hoverTech));
+  } else if (!drag.hoverTech) {
+    openModal(src, makePointEndpoint({ x: drag.pointerWorldX, y: drag.pointerWorldY }));
+  }
+}
+
+function startDragAt(sx, sy) {
+  // Prefer tech node as source; fall back to a free endpoint dot.
+  const t = techAtScreen(sx, sy);
+  if (t && owned.has(t.id)) {
+    const w = screenToWorld(sx, sy);
+    drag = { fromTech: t, fromPoint: null, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
+    return true;
+  }
+  const ep = endpointAtScreen(sx, sy);
+  if (ep) {
+    const w = screenToWorld(sx, sy);
+    drag = { fromTech: null, fromPoint: ep, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
+    return true;
+  }
+  return false;
+}
 
 function onMouseDown(e) {
   if (e.button !== 0) return;
-  const t = techAtScreen(e.clientX, e.clientY);
-  if (!t || !owned.has(t.id)) return;
-  const w = screenToWorld(e.clientX, e.clientY);
-  drag = { fromTech: t, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
-  draw();
+  if (startDragAt(e.clientX, e.clientY)) draw();
 }
 
 function onMouseMove(e) {
@@ -511,20 +587,15 @@ function onMouseMove(e) {
   drag.pointerWorldX = w.x;
   drag.pointerWorldY = w.y;
   const t = techAtScreen(e.clientX, e.clientY);
-  drag.hoverTech = (t && !owned.has(t.id) && t.id !== drag.fromTech.id) ? t : null;
+  // Don't allow hovering the source tech (if dragging from a tech).
+  const sameAsSource = drag.fromTech && t && t.id === drag.fromTech.id;
+  drag.hoverTech = (t && !owned.has(t.id) && !sameAsSource) ? t : null;
   draw();
 }
 
 function onMouseUp() {
   if (!drag) return;
-  // If the drag ends on a tech (and it's not the source / not already
-  // owned) → research-mode modal. Otherwise → free-line modal at the
-  // release point.
-  if (drag.hoverTech && !owned.has(drag.hoverTech.id)) {
-    openModal(drag.fromTech, drag.hoverTech, null);
-  } else if (!drag.hoverTech) {
-    openModal(drag.fromTech, null, { x: drag.pointerWorldX, y: drag.pointerWorldY });
-  }
+  resolveDragRelease();
   drag = null;
   draw();
 }
@@ -551,14 +622,7 @@ function onTouchStart(e) {
     touches.push({ id: t.identifier, x: t.clientX, y: t.clientY });
   }
   if (touches.length === 1) {
-    // start research drag
-    const t = touches[0];
-    const tech = techAtScreen(t.x, t.y);
-    if (tech && owned.has(tech.id)) {
-      const w = screenToWorld(t.x, t.y);
-      drag = { fromTech: tech, pointerWorldX: w.x, pointerWorldY: w.y, hoverTech: null };
-      draw();
-    }
+    if (startDragAt(touches[0].x, touches[0].y)) draw();
   } else if (touches.length >= 2) {
     // start pinch — cancel any in-progress drag
     drag = null;
@@ -583,7 +647,8 @@ function onTouchMove(e) {
     drag.pointerWorldX = w.x;
     drag.pointerWorldY = w.y;
     const t = techAtScreen(touches[0].x, touches[0].y);
-    drag.hoverTech = (t && !owned.has(t.id) && t.id !== drag.fromTech.id) ? t : null;
+    const sameAsSource = drag.fromTech && t && t.id === drag.fromTech.id;
+    drag.hoverTech = (t && !owned.has(t.id) && !sameAsSource) ? t : null;
     draw();
   } else if (touches.length >= 2 && pinchState) {
     const newDist = dist(touches[0], touches[1]);
@@ -610,29 +675,23 @@ function onTouchEnd(e) {
   }
   if (touches.length < 2) pinchState = null;
   if (touches.length === 0 && drag) {
-    if (drag.hoverTech && !owned.has(drag.hoverTech.id)) {
-      openModal(drag.fromTech, drag.hoverTech, null);
-    } else if (!drag.hoverTech) {
-      openModal(drag.fromTech, null, { x: drag.pointerWorldX, y: drag.pointerWorldY });
-    }
+    resolveDragRelease();
     drag = null;
     draw();
   }
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────
-// Either `to` (a tech) or `toPoint` ({x,y}) — never both. The first
-// case researches the tech. The second just draws the line.
-function openModal(from, to, toPoint) {
-  const target = to || toPoint;
-  const { cost, dist: d } = costFor(from, target);
-  pending = { from, to, toPoint, cost };
-  if (to) {
-    document.getElementById('modal-title').textContent = 'Research ' + to.name;
-    document.getElementById('modal-from').textContent = 'From ' + from.name + (to.tier ? ' → Tier ' + to.tier : '');
+// src and tgt are unified endpoint objects: { x, y, name, tech, pointKey }
+function openModal(src, tgt) {
+  const { cost, dist: d } = costFor(src, tgt);
+  pending = { src, tgt, cost };
+  if (tgt.tech) {
+    document.getElementById('modal-title').textContent = 'Research ' + tgt.tech.name;
+    document.getElementById('modal-from').textContent = 'From ' + src.name + (tgt.tech.tier ? ' → Tier ' + tgt.tech.tier : '');
   } else {
     document.getElementById('modal-title').textContent = 'Draw line to this point?';
-    document.getElementById('modal-from').textContent = 'From ' + from.name + ' (no tech at endpoint)';
+    document.getElementById('modal-from').textContent = 'From ' + src.name + ' (no tech at endpoint)';
   }
   document.getElementById('modal-cost').textContent = cost + ' ★';
   document.getElementById('modal-distance').textContent = 'distance: ' + d + ' world-px';
@@ -682,14 +741,19 @@ function init() {
   document.getElementById('btn-accept').addEventListener('click', () => {
     if (!pending) return;
     spent += pending.cost;
-    if (pending.to) {
-      // Research-mode: claim the tech, draw connection to the node
-      owned.add(pending.to.id);
-      connections.push({ fromId: pending.from.id, toId: pending.to.id });
+    const { src, tgt } = pending;
+    // Endpoints may be a tech (use fromId/toId) or a free point
+    // (use fromPoint/toPoint). 4 combos handled by the same shape.
+    const conn = {};
+    if (src.tech) conn.fromId = src.tech.id;
+    else conn.fromPoint = { x: src.x, y: src.y };
+    if (tgt.tech) {
+      conn.toId = tgt.tech.id;
+      owned.add(tgt.tech.id);
     } else {
-      // Free-line mode: draw connection to an arbitrary point
-      connections.push({ fromId: pending.from.id, toPoint: { x: pending.toPoint.x, y: pending.toPoint.y } });
+      conn.toPoint = { x: tgt.x, y: tgt.y };
     }
+    connections.push(conn);
     updateHUD();
     closeModal();
     draw();
