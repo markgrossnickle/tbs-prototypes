@@ -92,8 +92,8 @@
     }
     .ap-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
     .ap-sub { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
-    .ap-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
-    .ap-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
+    .ap-buttons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 8px; }
+    .ap-btn { display: flex; flex-direction: column; align-items: center; gap: 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
     .ap-btn:hover:not(:disabled) { background: #1a2542; }
     .ap-btn:active:not(:disabled) { transform: scale(0.97); }
     .ap-btn:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -191,6 +191,16 @@
       <button class="ap-btn" id="makeRiderBtn">
         <div class="ap-icon" style="background:#78350f"></div>
         <span>Rider</span>
+        <span class="ap-cost">3★</span>
+      </button>
+      <button class="ap-btn" id="makeArcherBtn">
+        <div class="ap-icon" style="background:#15803d"></div>
+        <span>Archer</span>
+        <span class="ap-cost">3★</span>
+      </button>
+      <button class="ap-btn" id="makeDefenderBtn">
+        <div class="ap-icon" style="background:#6b7280"></div>
+        <span>Defender</span>
         <span class="ap-cost">3★</span>
       </button>
     </div>
@@ -1469,6 +1479,8 @@ const apTitle = document.getElementById('apTitle');
 const apSub = document.getElementById('apSub');
 const makeWarriorBtn = document.getElementById('makeWarriorBtn');
 const makeRiderBtn = document.getElementById('makeRiderBtn');
+const makeArcherBtn = document.getElementById('makeArcherBtn');
+const makeDefenderBtn = document.getElementById('makeDefenderBtn');
 const apCloseBtn = document.getElementById('apCloseBtn');
 const passOverlay = document.getElementById('passOverlay');
 const passTitle = document.getElementById('passTitle');
@@ -1544,6 +1556,8 @@ function updateActionPicker() {
       apSub.textContent = empty ? `Train a unit (${stars}★ available)` : 'A unit is here';
       makeWarriorBtn.disabled = !empty || stars < UNIT_STATS.warrior.cost;
       makeRiderBtn.disabled = !empty || stars < UNIT_STATS.rider.cost;
+      makeArcherBtn.disabled = !empty || stars < UNIT_STATS.archer.cost;
+      makeDefenderBtn.disabled = !empty || stars < UNIT_STATS.defender.cost;
       return;
     }
   }
@@ -1566,6 +1580,16 @@ makeRiderBtn.addEventListener('click', () => {
   if (!game.selected) return;
   const v = game.villageAt(game.selected.q, game.selected.r);
   if (v) clientTrainUnit(v, 'rider');
+});
+makeArcherBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'archer');
+});
+makeDefenderBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'defender');
 });
 apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
