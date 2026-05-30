@@ -70,6 +70,7 @@
       <div class="legend-item"><div class="swatch" style="background:#86efac"></div>plains</div>
       <div class="legend-item"><div class="swatch" style="background:#15803d"></div>trees</div>
       <div class="legend-item"><div class="swatch" style="background:#7c6f5a"></div>mountain</div>
+      <div class="legend-item"><div class="swatch" style="background:#9a3412"></div>village</div>
     </div>
   </div>
 
@@ -107,6 +108,8 @@ const HEX_SIZE = 36;          // world-pixel "radius" of a hex (center to corner
 const ISO_Y_SCALE = 0.68;     // 1.0 = top-down, ~0.5 = true isometric (30° pitch)
 const TILE_DEPTH = 14;        // pixel depth of the tile "side" at zoom 1 — makes 3D block read
 const WATER_SINK = 7;         // water tiles render this many px lower than land surface
+const VILLAGE_TARGET = 8;     // approx number of villages per board (Polytopia-like density)
+const VILLAGE_MIN_DIST = 2;   // min hex distance between any two villages
 
 // ---- Tile types ----
 const TILE = {
@@ -115,6 +118,12 @@ const TILE = {
   TREES:    { id: 'trees',    top: '#15803d', side: '#14532d', label: 'trees' },
   MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'mountain' },
 };
+
+// ---- Hex distance (axial → cube) ----
+function hexDistance(q1, r1, q2, r2) {
+  const s1 = -q1 - r1, s2 = -q2 - r2;
+  return Math.max(Math.abs(q1 - q2), Math.abs(r1 - r2), Math.abs(s1 - s2));
+}
 
 // ============================================================
 // Hex board generation
@@ -172,10 +181,24 @@ function generateMap(seed, radius) {
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
 
-    return { q, r, type };
+    return { q, r, type, hasVillage: false };
   });
 
-  return { radius, tiles, seed };
+  // Village placement: pick plains tiles, spaced at least VILLAGE_MIN_DIST hexes apart.
+  // Shuffle the candidate list with the seeded RNG so placement is deterministic.
+  const candidates = tiles.filter(t => t.type === TILE.PLAINS).slice();
+  for (let i = candidates.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    [candidates[i], candidates[j]] = [candidates[j], candidates[i]];
+  }
+  const villages = [];
+  for (const c of candidates) {
+    if (villages.length >= VILLAGE_TARGET) break;
+    const ok = villages.every(v => hexDistance(v.q, v.r, c.q, c.r) >= VILLAGE_MIN_DIST);
+    if (ok) { villages.push(c); c.hasVillage = true; }
+  }
+
+  return { radius, tiles, seed, villages: villages.length };
 }
 
 function minAxialDistance(q, r, points) {
@@ -370,6 +393,62 @@ function drawTile(tile) {
   if (type === TILE.TREES) drawTreeCluster(topCenter.x, topCenter.y, sz, szY);
   else if (type === TILE.MOUNTAIN) drawMountain(topCenter.x, topCenter.y, sz, szY);
   else if (type === TILE.WATER) drawWaterShine(topCenter.x, topCenter.y, sz, szY);
+
+  // Village on plains
+  if (tile.hasVillage && type === TILE.PLAINS) drawVillage(topCenter.x, topCenter.y, sz, szY);
+}
+
+function drawVillage(cx, cy, sz, szY) {
+  // Small hut: rectangular wall + triangular roof + door.
+  // Sized to read at thumbnail and at zoom.
+  const wallW = sz * 0.46;
+  const wallH = sz * 0.30;
+  const roofH = sz * 0.24;
+  const baseY = cy + szY * 0.10;
+  const wallTop = baseY - wallH;
+
+  // Wall (front face)
+  ctx.fillStyle = '#e8c79a';
+  ctx.fillRect(cx - wallW / 2, wallTop, wallW, wallH);
+  // Right-side shadow on wall
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.fillRect(cx, wallTop, wallW / 2, wallH);
+  // Wall outline
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+  ctx.strokeRect(cx - wallW / 2, wallTop, wallW, wallH);
+
+  // Roof (gable triangle, slight overhang)
+  const overhang = sz * 0.05;
+  ctx.beginPath();
+  ctx.moveTo(cx, wallTop - roofH);
+  ctx.lineTo(cx - wallW / 2 - overhang, wallTop);
+  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
+  ctx.closePath();
+  ctx.fillStyle = '#9a3412';
+  ctx.fill();
+  // Right-side shadow on roof
+  ctx.beginPath();
+  ctx.moveTo(cx, wallTop - roofH);
+  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
+  ctx.lineTo(cx, wallTop);
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,0,0,0.22)';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+  ctx.beginPath();
+  ctx.moveTo(cx, wallTop - roofH);
+  ctx.lineTo(cx - wallW / 2 - overhang, wallTop);
+  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
+  ctx.closePath();
+  ctx.stroke();
+
+  // Door
+  const doorW = sz * 0.12;
+  const doorH = sz * 0.17;
+  ctx.fillStyle = '#3c2410';
+  ctx.fillRect(cx - doorW / 2, baseY - doorH, doorW, doorH);
 }
 
 function drawTreeCluster(cx, cy, sz, szY) {
@@ -618,8 +697,10 @@ rerollBtn.addEventListener('click', reroll);
 resetViewBtn.addEventListener('click', () => { camera.reset(); draw(); });
 
 function updateHoverLabel() {
-  if (hovered) hoverLabel.textContent = `(${hovered.q},${hovered.r}) ${hovered.type.label}`;
-  else hoverLabel.textContent = '—';
+  if (hovered) {
+    const v = hovered.hasVillage ? ' + village' : '';
+    hoverLabel.textContent = `(${hovered.q},${hovered.r}) ${hovered.type.label}${v}`;
+  } else hoverLabel.textContent = '—';
 }
 
 dimsLabel.textContent = `radius ${BOARD_RADIUS} (${map.tiles.length} tiles)`;
