@@ -104,8 +104,9 @@ function mulberry32(seed) {
 const BOARD_RADIUS = 6;       // hex radius from center; radius N => 3N^2 + 3N + 1 tiles
                               // r=6 => 127 if rectangular bounding, but hex shape = 91 tiles
 const HEX_SIZE = 36;          // world-pixel "radius" of a hex (center to corner)
-const ISO_Y_SCALE = 0.85;     // 1.0 = top-down, 0.7 = strong iso. 0.85 = slight iso.
-const TILE_DEPTH = 6;         // pixel depth of the tile "side" at zoom 1
+const ISO_Y_SCALE = 0.58;     // 1.0 = top-down, ~0.5 = true isometric (30° pitch)
+const TILE_DEPTH = 14;        // pixel depth of the tile "side" at zoom 1 — makes 3D block read
+const WATER_SINK = 7;         // water tiles render this many px lower than land surface
 
 // ---- Tile types ----
 const TILE = {
@@ -295,32 +296,53 @@ function drawTile(tile) {
   const depth = TILE_DEPTH * camera.zoom;
   const type = tile.type;
 
-  // ---- Side wall (tile "thickness") ----
-  // The bottom-front edge of the hex. For a flat-top hex with corner index
-  // starting at 0° (right), corners 1 (60°), 2 (120°), 3 (180°), 4 (240°), 5 (300°).
-  // The "front" half (bottom of screen) is corners 1, 2, 3 going CW from right-side.
-  // Drop those corners by `depth` to form the visible wall.
-  if (type !== TILE.WATER) {
-    const front = [corners[1], corners[2], corners[3]]; // visible bottom-front edge
-    ctx.beginPath();
-    ctx.moveTo(front[0].x, front[0].y);
-    ctx.lineTo(front[1].x, front[1].y);
-    ctx.lineTo(front[2].x, front[2].y);
-    ctx.lineTo(front[2].x, front[2].y + depth);
-    ctx.lineTo(front[1].x, front[1].y + depth);
-    ctx.lineTo(front[0].x, front[0].y + depth);
-    ctx.closePath();
-    ctx.fillStyle = type.side;
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
-    ctx.stroke();
-  }
+  // Water sits lower than land — apply Y offset to corners + center
+  const sinkY = type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
+  const topCorners = corners.map(c => ({ x: c.x, y: c.y + sinkY }));
+  const topCenter = { x: center.x, y: center.y + sinkY };
+
+  // ---- Side wall ----
+  // For a flat-top hex (corners 0° right, then CCW), the bottom-front
+  // edge is corners 1 (60°), 2 (120°), 3 (180°). Drop those corners by
+  // `depth` to form the visible front wall.
+  // Two sub-faces with different shading: left-front (1→2) and
+  // right-front (2→3) — fakes a sun-from-upper-left lighting.
+  // For water, render a shallow well so it looks recessed.
+  const wallTop = topCorners;
+  const wallBot = topCorners.map(c => ({ x: c.x, y: c.y + depth }));
+
+  // Right-front face (corner 1 → 2)
+  ctx.beginPath();
+  ctx.moveTo(wallTop[1].x, wallTop[1].y);
+  ctx.lineTo(wallTop[2].x, wallTop[2].y);
+  ctx.lineTo(wallBot[2].x, wallBot[2].y);
+  ctx.lineTo(wallBot[1].x, wallBot[1].y);
+  ctx.closePath();
+  ctx.fillStyle = type.side;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.40)';
+  ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
+  ctx.stroke();
+
+  // Left-front face (corner 2 → 3) — slightly darker (shadowed)
+  ctx.beginPath();
+  ctx.moveTo(wallTop[2].x, wallTop[2].y);
+  ctx.lineTo(wallTop[3].x, wallTop[3].y);
+  ctx.lineTo(wallBot[3].x, wallBot[3].y);
+  ctx.lineTo(wallBot[2].x, wallBot[2].y);
+  ctx.closePath();
+  ctx.fillStyle = type.side;
+  ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.20)'; // shadow tint on the left face
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.40)';
+  ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
+  ctx.stroke();
 
   // ---- Hex top ----
   ctx.beginPath();
-  ctx.moveTo(corners[0].x, corners[0].y);
-  for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
+  ctx.moveTo(topCorners[0].x, topCorners[0].y);
+  for (let i = 1; i < 6; i++) ctx.lineTo(topCorners[i].x, topCorners[i].y);
   ctx.closePath();
   ctx.fillStyle = type.top;
   ctx.fill();
@@ -328,10 +350,26 @@ function drawTile(tile) {
   ctx.lineWidth = Math.max(0.6, 1 / camera.zoom);
   ctx.stroke();
 
+  // Subtle directional shading on the top — slightly darker on the
+  // right side to fake a sun-from-upper-left light. A thin overlay
+  // gradient is overkill; instead drop a soft right-side tint via
+  // a semi-transparent polygon over the right half of the hex.
+  ctx.save();
+  ctx.beginPath();
+  ctx.moveTo(topCorners[0].x, topCorners[0].y);   // right
+  ctx.lineTo(topCorners[1].x, topCorners[1].y);   // upper-right
+  ctx.lineTo(topCenter.x, topCenter.y);
+  ctx.lineTo(topCorners[5].x, topCorners[5].y);   // lower-right
+  ctx.closePath();
+  ctx.fillStyle = 'rgba(0,0,0,0.08)';
+  ctx.fill();
+  ctx.restore();
+
   // ---- Feature billboards ----
-  if (type === TILE.TREES) drawTreeCluster(center.x, center.y, sz, szY);
-  else if (type === TILE.MOUNTAIN) drawMountain(center.x, center.y, sz, szY);
-  else if (type === TILE.WATER) drawWaterShine(center.x, center.y, sz, szY);
+  // Drawn from the sunken (water) or surface (land) top center
+  if (type === TILE.TREES) drawTreeCluster(topCenter.x, topCenter.y, sz, szY);
+  else if (type === TILE.MOUNTAIN) drawMountain(topCenter.x, topCenter.y, sz, szY);
+  else if (type === TILE.WATER) drawWaterShine(topCenter.x, topCenter.y, sz, szY);
 }
 
 function drawTreeCluster(cx, cy, sz, szY) {
@@ -429,12 +467,13 @@ function draw() {
 
   for (const t of sorted) drawTile(t);
 
-  // Selected ring
+  // Selected ring — follows the visible top edge (apply WATER_SINK for water)
   if (hovered) {
-    const corners = tileScreenCorners(hovered.q, hovered.r);
+    const raw = tileScreenCorners(hovered.q, hovered.r);
+    const sinkY = hovered.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
     ctx.beginPath();
-    ctx.moveTo(corners[0].x, corners[0].y);
-    for (let i = 1; i < 6; i++) ctx.lineTo(corners[i].x, corners[i].y);
+    ctx.moveTo(raw[0].x, raw[0].y + sinkY);
+    for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
     ctx.closePath();
     ctx.strokeStyle = '#fcd34d';
     ctx.lineWidth = 2.5;
