@@ -51,6 +51,30 @@
       #seedInput { width: 70px; }
       .legend-item { font-size: 10px; }
     }
+    #actionPicker {
+      position: fixed;
+      left: 50%;
+      transform: translateX(-50%);
+      bottom: calc(env(safe-area-inset-bottom, 8px) + 56px);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 12px 14px;
+      min-width: 220px;
+      max-width: 320px;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.45);
+      z-index: 10;
+    }
+    .ap-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
+    .ap-sub { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
+    .ap-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
+    .ap-btn { flex: 1; display: flex; align-items: center; gap: 6px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
+    .ap-btn:hover:not(:disabled) { background: #1a2542; }
+    .ap-btn:active:not(:disabled) { transform: scale(0.97); }
+    .ap-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+    .ap-icon { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #0006; flex-shrink: 0; }
+    .ap-close { width: 100%; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
+    .ap-close:hover { color: var(--text); }
   </style>
 </head>
 <body>
@@ -71,7 +95,24 @@
       <div class="legend-item"><div class="swatch" style="background:#15803d"></div>trees</div>
       <div class="legend-item"><div class="swatch" style="background:#7c6f5a"></div>mountain</div>
       <div class="legend-item"><div class="swatch" style="background:#9a3412"></div>village</div>
+      <div class="legend-item"><div class="swatch" style="background:#1d4ed8"></div>my village</div>
     </div>
+  </div>
+
+  <div id="actionPicker" style="display:none">
+    <div class="ap-title">My Village</div>
+    <div class="ap-sub" id="apSub">Empty — train a unit</div>
+    <div class="ap-buttons">
+      <button class="ap-btn" id="makeWarriorBtn">
+        <div class="ap-icon" style="background:#dc2626"></div>
+        <span>Warrior</span>
+      </button>
+      <button class="ap-btn" id="makeRiderBtn">
+        <div class="ap-icon" style="background:#78350f"></div>
+        <span>Rider</span>
+      </button>
+    </div>
+    <button class="ap-close" id="apCloseBtn">Close</button>
   </div>
 
 <script>
@@ -109,7 +150,17 @@ const ISO_Y_SCALE = 0.68;     // 1.0 = top-down, ~0.5 = true isometric (30° pit
 const TILE_DEPTH = 14;        // pixel depth of the tile "side" at zoom 1 — makes 3D block read
 const WATER_SINK = 7;         // water tiles render this many px lower than land surface
 const VILLAGE_TARGET = 8;     // approx number of villages per board (Polytopia-like density)
-const VILLAGE_MIN_DIST = 2;   // min hex distance between any two villages
+const VILLAGE_MIN_DIST = 3;   // hex distance ≥3 → 2 empty tiles between any two villages
+
+// Axial neighbor offsets (flat-top, 6 directions)
+const HEX_NEIGHBOR_OFFSETS = [
+  { q:  1, r:  0 }, { q:  1, r: -1 }, { q:  0, r: -1 },
+  { q: -1, r:  0 }, { q: -1, r:  1 }, { q:  0, r:  1 },
+];
+
+function neighborsOf(q, r) {
+  return HEX_NEIGHBOR_OFFSETS.map(n => ({ q: q + n.q, r: r + n.r }));
+}
 
 // ---- Tile types ----
 const TILE = {
@@ -181,7 +232,7 @@ function generateMap(seed, radius) {
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
 
-    return { q, r, type, hasVillage: false };
+    return { q, r, type, hasVillage: false, isMine: false, hasUnit: null };
   });
 
   // Village placement: pick plains tiles, spaced at least VILLAGE_MIN_DIST hexes apart.
@@ -198,7 +249,15 @@ function generateMap(seed, radius) {
     if (ok) { villages.push(c); c.hasVillage = true; }
   }
 
-  return { radius, tiles, seed, villages: villages.length };
+  // Pick the most central village as "my village"
+  let myVillage = null;
+  if (villages.length > 0) {
+    villages.sort((a, b) => hexDistance(a.q, a.r, 0, 0) - hexDistance(b.q, b.r, 0, 0));
+    myVillage = villages[0];
+    myVillage.isMine = true;
+  }
+
+  return { radius, tiles, seed, villages: villages.length, myVillage };
 }
 
 function minAxialDistance(q, r, points) {
@@ -395,39 +454,42 @@ function drawTile(tile) {
   else if (type === TILE.WATER) drawWaterShine(topCenter.x, topCenter.y, sz, szY);
 
   // Village on plains
-  if (tile.hasVillage && type === TILE.PLAINS) drawVillage(topCenter.x, topCenter.y, sz, szY);
+  if (tile.hasVillage && type === TILE.PLAINS) drawVillage(topCenter.x, topCenter.y, sz, szY, tile.isMine);
+
+  // Unit on top (always last)
+  if (tile.hasUnit) drawUnit(topCenter.x, topCenter.y, sz, szY, tile.hasUnit);
 }
 
-function drawVillage(cx, cy, sz, szY) {
+function drawVillage(cx, cy, sz, szY, isMine) {
   // Small hut: rectangular wall + triangular roof + door.
-  // Sized to read at thumbnail and at zoom.
   const wallW = sz * 0.46;
   const wallH = sz * 0.30;
   const roofH = sz * 0.24;
   const baseY = cy + szY * 0.10;
   const wallTop = baseY - wallH;
 
+  // "My village" has a blue roof + lighter walls; other villages stay tan/red
+  const roofColor = isMine ? '#1d4ed8' : '#9a3412';
+  const wallColor = isMine ? '#f1f5f9' : '#e8c79a';
+
   // Wall (front face)
-  ctx.fillStyle = '#e8c79a';
+  ctx.fillStyle = wallColor;
   ctx.fillRect(cx - wallW / 2, wallTop, wallW, wallH);
-  // Right-side shadow on wall
   ctx.fillStyle = 'rgba(0,0,0,0.22)';
   ctx.fillRect(cx, wallTop, wallW / 2, wallH);
-  // Wall outline
   ctx.strokeStyle = 'rgba(0,0,0,0.55)';
   ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
   ctx.strokeRect(cx - wallW / 2, wallTop, wallW, wallH);
 
-  // Roof (gable triangle, slight overhang)
+  // Roof
   const overhang = sz * 0.05;
   ctx.beginPath();
   ctx.moveTo(cx, wallTop - roofH);
   ctx.lineTo(cx - wallW / 2 - overhang, wallTop);
   ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
   ctx.closePath();
-  ctx.fillStyle = '#9a3412';
+  ctx.fillStyle = roofColor;
   ctx.fill();
-  // Right-side shadow on roof
   ctx.beginPath();
   ctx.moveTo(cx, wallTop - roofH);
   ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
@@ -449,6 +511,123 @@ function drawVillage(cx, cy, sz, szY) {
   const doorH = sz * 0.17;
   ctx.fillStyle = '#3c2410';
   ctx.fillRect(cx - doorW / 2, baseY - doorH, doorW, doorH);
+
+  // Flag on my village
+  if (isMine) {
+    const poleX = cx + wallW / 2 + overhang - sz * 0.02;
+    const poleTop = wallTop - roofH - sz * 0.30;
+    ctx.strokeStyle = '#4b5563';
+    ctx.lineWidth = Math.max(0.8, 1.2 / camera.zoom);
+    ctx.beginPath();
+    ctx.moveTo(poleX, wallTop - roofH);
+    ctx.lineTo(poleX, poleTop);
+    ctx.stroke();
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath();
+    ctx.moveTo(poleX, poleTop);
+    ctx.lineTo(poleX + sz * 0.16, poleTop + sz * 0.04);
+    ctx.lineTo(poleX, poleTop + sz * 0.10);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawUnit(cx, cy, sz, szY, unit) {
+  // Both units stand at tile front-center, scaled to read at full board zoom.
+  const baseY = cy + szY * 0.18;
+  if (unit.type === 'warrior') {
+    // Warrior: helmeted head + body + shield + sword
+    const bodyW = sz * 0.20;
+    const bodyH = sz * 0.28;
+    const headR = sz * 0.10;
+    const bodyTop = baseY - bodyH;
+    // Body
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    // Head
+    ctx.beginPath();
+    ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = '#fde68a';
+    ctx.fill();
+    ctx.stroke();
+    // Helmet (top half of head, gray)
+    ctx.beginPath();
+    ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, Math.PI, 2 * Math.PI);
+    ctx.closePath();
+    ctx.fillStyle = '#6b7280';
+    ctx.fill();
+    ctx.stroke();
+    // Shield (left)
+    ctx.fillStyle = '#a16207';
+    ctx.fillRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
+    ctx.strokeRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
+  } else if (unit.type === 'rider') {
+    // Rider: horse body + rider on top
+    const horseY = baseY - sz * 0.18;
+    const horseW = sz * 0.42;
+    const horseH = sz * 0.16;
+    // Horse body
+    ctx.fillStyle = '#78350f';
+    ctx.fillRect(cx - horseW / 2, horseY, horseW, horseH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+    ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - horseW / 2, horseY, horseW, horseH);
+    // Horse legs (4)
+    const legW = sz * 0.04;
+    const legH = sz * 0.10;
+    ctx.fillStyle = '#78350f';
+    ctx.fillRect(cx - horseW / 2 + sz * 0.02, horseY + horseH, legW, legH);
+    ctx.fillRect(cx - horseW / 2 + sz * 0.10, horseY + horseH, legW, legH);
+    ctx.fillRect(cx + horseW / 2 - sz * 0.06, horseY + horseH, legW, legH);
+    ctx.fillRect(cx + horseW / 2 - sz * 0.14, horseY + horseH, legW, legH);
+    // Horse head (small bump on the right)
+    ctx.fillRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
+    ctx.strokeRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
+    // Rider torso
+    const riderW = sz * 0.14;
+    const riderH = sz * 0.18;
+    const riderTop = horseY - riderH;
+    ctx.fillStyle = '#dc2626';
+    ctx.fillRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
+    ctx.strokeRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
+    // Rider head
+    const riderHeadR = sz * 0.08;
+    ctx.beginPath();
+    ctx.arc(cx - sz * 0.04, riderTop - riderHeadR + sz * 0.02, riderHeadR, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fillStyle = '#fde68a';
+    ctx.fill();
+    ctx.stroke();
+  }
+}
+
+// Draw a soft territory border around the 6 hexes adjacent to my village.
+function drawTerritory(myVillage) {
+  if (!myVillage) return;
+  const neighbors = neighborsOf(myVillage.q, myVillage.r);
+  // We also want to include the village tile itself in the territory
+  const territory = [{ q: myVillage.q, r: myVillage.r }, ...neighbors]
+    .filter(({ q, r }) => map.tiles.some(t => t.q === q && t.r === r));
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(250, 204, 21, 0.85)';
+  ctx.lineWidth = Math.max(1.5, 2.2 / camera.zoom);
+  ctx.setLineDash([Math.max(3, 5 / camera.zoom), Math.max(3, 5 / camera.zoom)]);
+  for (const { q, r } of territory) {
+    const tile = map.tiles.find(t => t.q === q && t.r === r);
+    const raw = tileScreenCorners(q, r);
+    const sinkY = tile && tile.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
+    ctx.beginPath();
+    ctx.moveTo(raw[0].x, raw[0].y + sinkY);
+    for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
+    ctx.closePath();
+    ctx.stroke();
+  }
+  ctx.restore();
 }
 
 function drawTreeCluster(cx, cy, sz, szY) {
@@ -546,6 +725,9 @@ function draw() {
 
   for (const t of sorted) drawTile(t);
 
+  // Territory border around my village
+  drawTerritory(map.myVillage);
+
   // Selected ring — follows the visible top edge (apply WATER_SINK for water)
   if (hovered) {
     const raw = tileScreenCorners(hovered.q, hovered.r);
@@ -634,6 +816,7 @@ function pointerUp(e) {
       const t = tileAtScreen(e.clientX, e.clientY);
       hovered = t;
       updateHoverLabel();
+      refreshActionPicker();
       draw();
     }
     panBase = null;
@@ -683,6 +866,7 @@ function setSeed(s) {
   seedInput.value = String(n);
   hovered = null;
   updateHoverLabel();
+  refreshActionPicker();
   camera.reset();
   draw();
 }
@@ -698,10 +882,53 @@ resetViewBtn.addEventListener('click', () => { camera.reset(); draw(); });
 
 function updateHoverLabel() {
   if (hovered) {
-    const v = hovered.hasVillage ? ' + village' : '';
-    hoverLabel.textContent = `(${hovered.q},${hovered.r}) ${hovered.type.label}${v}`;
+    const v = hovered.hasVillage ? (hovered.isMine ? ' + my village' : ' + village') : '';
+    const u = hovered.hasUnit ? ` [${hovered.hasUnit.type}]` : '';
+    hoverLabel.textContent = `(${hovered.q},${hovered.r}) ${hovered.type.label}${v}${u}`;
   } else hoverLabel.textContent = '—';
 }
+
+// Action picker
+const actionPicker = document.getElementById('actionPicker');
+const apSub = document.getElementById('apSub');
+const makeWarriorBtn = document.getElementById('makeWarriorBtn');
+const makeRiderBtn = document.getElementById('makeRiderBtn');
+const apCloseBtn = document.getElementById('apCloseBtn');
+
+function refreshActionPicker() {
+  if (hovered && hovered.isMine) {
+    actionPicker.style.display = 'block';
+    const empty = !hovered.hasUnit;
+    apSub.textContent = empty ? 'Empty — train a unit' : `${hovered.hasUnit.type} is here`;
+    makeWarriorBtn.disabled = !empty;
+    makeRiderBtn.disabled = !empty;
+  } else {
+    actionPicker.style.display = 'none';
+  }
+}
+
+makeWarriorBtn.addEventListener('click', () => {
+  if (hovered && hovered.isMine && !hovered.hasUnit) {
+    hovered.hasUnit = { type: 'warrior' };
+    refreshActionPicker();
+    updateHoverLabel();
+    draw();
+  }
+});
+makeRiderBtn.addEventListener('click', () => {
+  if (hovered && hovered.isMine && !hovered.hasUnit) {
+    hovered.hasUnit = { type: 'rider' };
+    refreshActionPicker();
+    updateHoverLabel();
+    draw();
+  }
+});
+apCloseBtn.addEventListener('click', () => {
+  hovered = null;
+  refreshActionPicker();
+  updateHoverLabel();
+  draw();
+});
 
 dimsLabel.textContent = `radius ${BOARD_RADIUS} (${map.tiles.length} tiles)`;
 
