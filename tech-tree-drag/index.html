@@ -267,12 +267,14 @@ let connections = []; // [{ fromId, toId }, ...] research lines drawn green afte
 let drag = null;    // { fromTech, pointerWorldX, pointerWorldY, hoverTech }
 let pending = null; // { from, to, cost }
 
-// Free-form drag cost: Euclidean distance between the two nodes in
-// world coordinates, scaled. Player draws from ANY owned tech to ANY
-// unowned tech — no constraint to the tree's parent-child edges.
-function costFor(fromTech, toTech) {
-  const dx = fromTech.x - toTech.x;
-  const dy = fromTech.y - toTech.y;
+// Free-form drag cost: Euclidean distance in world coordinates. The
+// target can be a tech (research it) OR a free point on the canvas
+// (just draw a line there, no research). Either way, distance = cost.
+function costFor(fromTech, target) {
+  const tx = (target && target.x !== undefined) ? target.x : 0;
+  const ty = (target && target.y !== undefined) ? target.y : 0;
+  const dx = fromTech.x - tx;
+  const dy = fromTech.y - ty;
   const dist = Math.sqrt(dx*dx + dy*dy);
   return { dist: Math.round(dist), cost: Math.max(5, Math.round(dist / 8)) };
 }
@@ -368,22 +370,45 @@ function draw() {
   ctx.lineCap = 'round';
   connections.forEach(c => {
     const f = TECHS.find(x => x.id === c.fromId);
-    const t = TECHS.find(x => x.id === c.toId);
-    if (!f || !t) return;
+    if (!f) return;
+    let endX, endY;
+    if (c.toId) {
+      const t = TECHS.find(x => x.id === c.toId);
+      if (!t) return;
+      endX = t.x; endY = t.y;
+    } else if (c.toPoint) {
+      endX = c.toPoint.x; endY = c.toPoint.y;
+    } else {
+      return;
+    }
     ctx.beginPath();
     ctx.moveTo(f.x, f.y);
-    ctx.lineTo(t.x, t.y);
+    ctx.lineTo(endX, endY);
     ctx.stroke();
+    // For free-line endpoints (no tech at the end), put a small green
+    // dot so the line clearly TERMINATES there rather than looking
+    // like a leak into empty space.
+    if (!c.toId) {
+      ctx.beginPath();
+      ctx.arc(endX, endY, 10 / scale, 0, Math.PI * 2);
+      ctx.fillStyle = '#22c55e';
+      ctx.fill();
+    }
   });
   ctx.lineCap = 'butt';
 
-  // Drag line
+  // Drag line — shown for the whole drag (either landing on a tech or
+  // ending in free canvas). Cost label always visible.
   if (drag) {
     const hover = drag.hoverTech;
+    // Free-line is OK at any pointer position; research is OK when
+    // hovering an unowned tech. Visualized identically except the
+    // endpoint color cue.
+    const onValidTech = hover && !owned.has(hover.id);
     const tx = hover ? hover.x : drag.pointerWorldX;
     const ty = hover ? hover.y : drag.pointerWorldY;
-    const valid = hover && !owned.has(hover.id);
-    ctx.strokeStyle = valid ? '#fbbf24' : 'rgba(251, 191, 36, 0.4)';
+    const target = hover ? hover : { x: tx, y: ty };
+    ctx.strokeStyle = onValidTech ? '#fbbf24' : '#fbbf2488';
     ctx.lineWidth = 3 / scale;
     ctx.setLineDash([8 / scale, 4 / scale]);
     ctx.beginPath();
@@ -392,21 +417,21 @@ function draw() {
     ctx.stroke();
     ctx.setLineDash([]);
 
-    if (valid) {
-      const { cost } = costFor(drag.fromTech, hover);
-      const mx = (drag.fromTech.x + hover.x) / 2;
-      const my = (drag.fromTech.y + hover.y) / 2;
-      const labelW = 80 / scale, labelH = 30 / scale;
-      ctx.fillStyle = '#fbbf24';
-      ctx.beginPath();
-      ctx.roundRect(mx - labelW/2, my - labelH/2, labelW, labelH, 12 / scale);
-      ctx.fill();
-      ctx.fillStyle = '#0f172a';
-      ctx.font = `bold ${18/scale}px -apple-system`;
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.fillText(cost + ' ★', mx, my);
-    }
+    // Cost label at midpoint — always shown so the player knows what
+    // the spend would be before they release.
+    const { cost } = costFor(drag.fromTech, target);
+    const mx = (drag.fromTech.x + tx) / 2;
+    const my = (drag.fromTech.y + ty) / 2;
+    const labelW = 90 / scale, labelH = 30 / scale;
+    ctx.fillStyle = onValidTech ? '#fbbf24' : 'rgba(251, 191, 36, 0.9)';
+    ctx.beginPath();
+    ctx.roundRect(mx - labelW/2, my - labelH/2, labelW, labelH, 12 / scale);
+    ctx.fill();
+    ctx.fillStyle = '#0f172a';
+    ctx.font = `bold ${18/scale}px -apple-system`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(cost + ' ★', mx, my);
   }
 
   // Nodes
@@ -492,7 +517,14 @@ function onMouseMove(e) {
 
 function onMouseUp() {
   if (!drag) return;
-  if (drag.hoverTech && !owned.has(drag.hoverTech.id)) openModal(drag.fromTech, drag.hoverTech);
+  // If the drag ends on a tech (and it's not the source / not already
+  // owned) → research-mode modal. Otherwise → free-line modal at the
+  // release point.
+  if (drag.hoverTech && !owned.has(drag.hoverTech.id)) {
+    openModal(drag.fromTech, drag.hoverTech, null);
+  } else if (!drag.hoverTech) {
+    openModal(drag.fromTech, null, { x: drag.pointerWorldX, y: drag.pointerWorldY });
+  }
   drag = null;
   draw();
 }
@@ -578,18 +610,30 @@ function onTouchEnd(e) {
   }
   if (touches.length < 2) pinchState = null;
   if (touches.length === 0 && drag) {
-    if (drag.hoverTech && !owned.has(drag.hoverTech.id)) openModal(drag.fromTech, drag.hoverTech);
+    if (drag.hoverTech && !owned.has(drag.hoverTech.id)) {
+      openModal(drag.fromTech, drag.hoverTech, null);
+    } else if (!drag.hoverTech) {
+      openModal(drag.fromTech, null, { x: drag.pointerWorldX, y: drag.pointerWorldY });
+    }
     drag = null;
     draw();
   }
 }
 
 // ── Modal ─────────────────────────────────────────────────────────────
-function openModal(from, to) {
-  const { cost, dist: d } = costFor(from, to);
-  pending = { from, to, cost };
-  document.getElementById('modal-title').textContent = 'Research ' + to.name;
-  document.getElementById('modal-from').textContent = 'From ' + from.name + (to.tier ? ' → Tier ' + to.tier : '');
+// Either `to` (a tech) or `toPoint` ({x,y}) — never both. The first
+// case researches the tech. The second just draws the line.
+function openModal(from, to, toPoint) {
+  const target = to || toPoint;
+  const { cost, dist: d } = costFor(from, target);
+  pending = { from, to, toPoint, cost };
+  if (to) {
+    document.getElementById('modal-title').textContent = 'Research ' + to.name;
+    document.getElementById('modal-from').textContent = 'From ' + from.name + (to.tier ? ' → Tier ' + to.tier : '');
+  } else {
+    document.getElementById('modal-title').textContent = 'Draw line to this point?';
+    document.getElementById('modal-from').textContent = 'From ' + from.name + ' (no tech at endpoint)';
+  }
   document.getElementById('modal-cost').textContent = cost + ' ★';
   document.getElementById('modal-distance').textContent = 'distance: ' + d + ' world-px';
   document.getElementById('modal').classList.add('open');
@@ -637,9 +681,15 @@ function init() {
   // Buttons
   document.getElementById('btn-accept').addEventListener('click', () => {
     if (!pending) return;
-    owned.add(pending.to.id);
     spent += pending.cost;
-    connections.push({ fromId: pending.from.id, toId: pending.to.id });
+    if (pending.to) {
+      // Research-mode: claim the tech, draw connection to the node
+      owned.add(pending.to.id);
+      connections.push({ fromId: pending.from.id, toId: pending.to.id });
+    } else {
+      // Free-line mode: draw connection to an arbitrary point
+      connections.push({ fromId: pending.from.id, toPoint: { x: pending.toPoint.x, y: pending.toPoint.y } });
+    }
     updateHUD();
     closeModal();
     draw();
