@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
-  <title>TBS Hex Map — Iso Prototype</title>
+  <title>TBS Hex Map — Pass & Play 1v1</title>
   <style>
     :root {
       color-scheme: dark;
@@ -12,12 +12,15 @@
       --line: #1f2a44;
       --text: #e6ecff;
       --muted: #8b9bbf;
-      --accent: #6ee7b7;
+      --p1: #3b82f6;
+      --p2: #dc2626;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; touch-action: none; }
     #canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; background: var(--bg); }
-    #ui {
+
+    /* Top turn banner */
+    #topBar {
       position: fixed;
       top: env(safe-area-inset-top, 8px);
       left: env(safe-area-inset-left, 8px);
@@ -33,24 +36,28 @@
     .pill.muted { color: var(--muted); }
     button.pill { cursor: pointer; user-select: none; }
     button.pill:active { transform: scale(0.97); }
-    #seedInput { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; width: 90px; font-size: 12px; }
-    #legend {
+    button.pill.primary { background: var(--p1); border-color: transparent; color: white; font-weight: 600; }
+    button.pill.p2 { background: var(--p2); }
+    #seedInput { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 999px; padding: 4px 8px; width: 80px; font-size: 12px; }
+    #turnPill { font-weight: 600; }
+    #turnPill.p1 { color: var(--p1); }
+    #turnPill.p2 { color: var(--p2); }
+
+    /* Bottom hover label + legend */
+    #bottomBar {
       position: fixed;
       bottom: calc(env(safe-area-inset-bottom, 8px) + 4px);
       left: env(safe-area-inset-left, 8px);
       right: env(safe-area-inset-right, 8px);
       display: flex;
-      justify-content: center;
+      flex-direction: column;
+      align-items: center;
+      gap: 4px;
       pointer-events: none;
     }
-    #legendInner { display: flex; gap: 12px; flex-wrap: wrap; justify-content: center; background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 6px 10px; }
-    .legend-item { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); }
-    .swatch { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #0006; }
-    @media (max-width: 480px) {
-      .pill { font-size: 11px; padding: 5px 8px; }
-      #seedInput { width: 70px; }
-      .legend-item { font-size: 10px; }
-    }
+    #hoverPill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; font-size: 11px; color: var(--muted); pointer-events: auto; }
+
+    /* Action picker (village or unit) */
     #actionPicker {
       position: fixed;
       left: 50%;
@@ -60,78 +67,144 @@
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 12px 14px;
-      min-width: 220px;
-      max-width: 320px;
+      min-width: 240px;
+      max-width: 340px;
       box-shadow: 0 8px 24px rgba(0,0,0,0.45);
       z-index: 10;
+      display: none;
     }
     .ap-title { font-weight: 600; font-size: 13px; margin-bottom: 2px; }
     .ap-sub { font-size: 11px; color: var(--muted); margin-bottom: 10px; }
     .ap-buttons { display: flex; gap: 8px; margin-bottom: 8px; }
-    .ap-btn { flex: 1; display: flex; align-items: center; gap: 6px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
+    .ap-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 4px; background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; font-size: 12px; cursor: pointer; }
     .ap-btn:hover:not(:disabled) { background: #1a2542; }
     .ap-btn:active:not(:disabled) { transform: scale(0.97); }
     .ap-btn:disabled { opacity: 0.4; cursor: not-allowed; }
-    .ap-icon { width: 12px; height: 12px; border-radius: 3px; border: 1px solid #0006; flex-shrink: 0; }
+    .ap-icon { width: 14px; height: 14px; border-radius: 3px; border: 1px solid #0006; }
+    .ap-cost { font-size: 10px; color: var(--muted); }
     .ap-close { width: 100%; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
     .ap-close:hover { color: var(--text); }
+
+    /* Pass-the-device screen */
+    #passOverlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(11, 18, 32, 0.97);
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 50;
+      padding: 24px;
+      text-align: center;
+    }
+    #passOverlay h1 { font-size: 28px; margin: 0 0 8px; }
+    #passOverlay p { color: var(--muted); margin: 0 0 24px; }
+    #passOverlay button { background: var(--p1); color: white; border: none; border-radius: 12px; padding: 14px 28px; font-size: 16px; font-weight: 600; cursor: pointer; }
+    #passOverlay button.p2 { background: var(--p2); }
+
+    /* Win screen */
+    #winOverlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(11, 18, 32, 0.97);
+      display: none;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      z-index: 60;
+      padding: 24px;
+      text-align: center;
+    }
+    #winOverlay h1 { font-size: 36px; margin: 0 0 12px; }
+    #winOverlay p { color: var(--muted); margin: 0 0 24px; }
+    #winOverlay button { background: var(--panel); color: white; border: 1px solid var(--line); border-radius: 12px; padding: 12px 24px; font-size: 14px; cursor: pointer; }
+
+    /* Combat log toast */
+    #combatToast {
+      position: fixed;
+      top: 60px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      padding: 8px 14px;
+      font-size: 12px;
+      opacity: 0;
+      transition: opacity 0.3s;
+      pointer-events: none;
+      z-index: 5;
+      max-width: 90%;
+    }
+    #combatToast.show { opacity: 1; }
+
+    @media (max-width: 480px) {
+      .pill { font-size: 11px; padding: 5px 8px; }
+      #seedInput { width: 60px; }
+      #passOverlay h1 { font-size: 22px; }
+      #winOverlay h1 { font-size: 28px; }
+    }
   </style>
 </head>
 <body>
   <canvas id="canvas"></canvas>
 
-  <div id="ui">
-    <div class="pill"><strong>Hex map</strong> <span class="muted" id="dimsLabel">radius 6 (91 tiles)</span></div>
+  <div id="topBar">
+    <div class="pill" id="turnPill">P1 · 5★ · Turn 1</div>
+    <button class="pill primary" id="endTurnBtn">End Turn</button>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
-    <button class="pill" id="rerollBtn">Reroll</button>
-    <button class="pill" id="resetViewBtn">Reset view</button>
-    <span class="pill muted" id="hoverLabel">—</span>
+    <button class="pill" id="newGameBtn">New game</button>
   </div>
 
-  <div id="legend">
-    <div id="legendInner">
-      <div class="legend-item"><div class="swatch" style="background:#2563eb"></div>water</div>
-      <div class="legend-item"><div class="swatch" style="background:#86efac"></div>plains</div>
-      <div class="legend-item"><div class="swatch" style="background:#15803d"></div>trees</div>
-      <div class="legend-item"><div class="swatch" style="background:#7c6f5a"></div>mountain</div>
-      <div class="legend-item"><div class="swatch" style="background:#9a3412"></div>village</div>
-      <div class="legend-item"><div class="swatch" style="background:#1d4ed8"></div>my village</div>
-    </div>
+  <div id="bottomBar">
+    <span id="hoverPill">tap a hex</span>
   </div>
 
-  <div id="actionPicker" style="display:none">
-    <div class="ap-title">My Village</div>
+  <div id="actionPicker">
+    <div class="ap-title" id="apTitle">My Village</div>
     <div class="ap-sub" id="apSub">Empty — train a unit</div>
     <div class="ap-buttons">
       <button class="ap-btn" id="makeWarriorBtn">
-        <div class="ap-icon" style="background:#dc2626"></div>
+        <div class="ap-icon" style="background:#3b82f6"></div>
         <span>Warrior</span>
+        <span class="ap-cost">2★</span>
       </button>
       <button class="ap-btn" id="makeRiderBtn">
         <div class="ap-icon" style="background:#78350f"></div>
         <span>Rider</span>
+        <span class="ap-cost">3★</span>
       </button>
     </div>
     <button class="ap-close" id="apCloseBtn">Close</button>
   </div>
 
+  <div id="passOverlay">
+    <h1 id="passTitle">Pass to Player 2</h1>
+    <p>Hand the device over. Tap the button below when ready.</p>
+    <button id="passBtn">I'm Player 2 — start turn</button>
+  </div>
+
+  <div id="winOverlay">
+    <h1 id="winTitle">Player 1 wins!</h1>
+    <p id="winSub">Captured the opposing village.</p>
+    <button id="winRestartBtn">Play again</button>
+  </div>
+
+  <div id="combatToast"></div>
+
 <script>
 'use strict';
 
 // ============================================================
-// PROTOTYPE v2: hex-shaped board (radius 6 = 91 tiles)
+// PASS & PLAY 1v1 — turn-based hex combat
 // ------------------------------------------------------------
-// Flat-top hex layout, axial coords centered at origin.
-// Board shape = hexagon (not rectangle) so it's not slanted.
-// Tiles tessellate perfectly: corners computed in WORLD space
-// then projected to screen with the iso Y-squash applied
-// uniformly. No overlap, no gaps.
-// Iso squash dialled to 0.85 (mild — "slightly iso").
-// Mountains / trees / water shimmers render above each tile.
-// Mobile: 1-finger pan, 2-finger pinch zoom, tap to select.
+// Two human players take turns on the same device.
+// Per spec at /specs/pass-n-play-1v1.md, rules per doc 10 GDD.
+// Pure-logic functions sit at the top; render + input below.
 // ============================================================
 
-// ---- Seeded RNG (mulberry32) — deterministic across reloads ----
+// ---- Seeded RNG (mulberry32) ----
 function mulberry32(seed) {
   let s = seed >>> 0;
   return function () {
@@ -143,53 +216,134 @@ function mulberry32(seed) {
 }
 
 // ---- Board params ----
-const BOARD_RADIUS = 6;       // hex radius from center; radius N => 3N^2 + 3N + 1 tiles
-                              // r=6 => 127 if rectangular bounding, but hex shape = 91 tiles
-const HEX_SIZE = 36;          // world-pixel "radius" of a hex (center to corner)
-const ISO_Y_SCALE = 0.68;     // 1.0 = top-down, ~0.5 = true isometric (30° pitch)
-const TILE_DEPTH = 14;        // pixel depth of the tile "side" at zoom 1 — makes 3D block read
-const WATER_SINK = 7;         // water tiles render this many px lower than land surface
-const VILLAGE_TARGET = 8;     // approx number of villages per board (Polytopia-like density)
-const VILLAGE_MIN_DIST = 3;   // hex distance ≥3 → 2 empty tiles between any two villages
+const BOARD_RADIUS = 6;
+const HEX_SIZE = 36;
+const ISO_Y_SCALE = 0.68;
+const TILE_DEPTH = 14;
+const WATER_SINK = 7;
+const VILLAGE_TARGET = 8;
+const VILLAGE_MIN_DIST = 3;
+const STARTING_STARS = 5;
+const STARS_PER_VILLAGE = 2;
 
-// Axial neighbor offsets (flat-top, 6 directions)
+const TILE = {
+  WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'water',    passable: false, defenseBonus: 1.0 },
+  PLAINS:   { id: 'plains',   top: '#86efac', side: '#4d7c4f', label: 'plains',   passable: true,  defenseBonus: 1.0 },
+  TREES:    { id: 'trees',    top: '#15803d', side: '#14532d', label: 'trees',    passable: true,  defenseBonus: 1.5 },
+  MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'mountain', passable: true,  defenseBonus: 1.5 },
+};
+
+const UNIT_STATS = {
+  warrior: { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Warrior' },
+  rider:   { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Rider'   },
+};
+
+const PLAYER_COLORS = {
+  0: { body: '#3b82f6', dark: '#1d4ed8', label: 'Player 1', short: 'P1' },
+  1: { body: '#dc2626', dark: '#991b1b', label: 'Player 2', short: 'P2' },
+};
+
+// ---- Hex math ----
+const SQRT3 = Math.sqrt(3);
 const HEX_NEIGHBOR_OFFSETS = [
   { q:  1, r:  0 }, { q:  1, r: -1 }, { q:  0, r: -1 },
   { q: -1, r:  0 }, { q: -1, r:  1 }, { q:  0, r:  1 },
 ];
 
-function neighborsOf(q, r) {
-  return HEX_NEIGHBOR_OFFSETS.map(n => ({ q: q + n.q, r: r + n.r }));
-}
-
-// ---- Tile types ----
-const TILE = {
-  WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'water' },
-  PLAINS:   { id: 'plains',   top: '#86efac', side: '#4d7c4f', label: 'plains' },
-  TREES:    { id: 'trees',    top: '#15803d', side: '#14532d', label: 'trees' },
-  MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'mountain' },
-};
-
-// ---- Hex distance (axial → cube) ----
+function neighborsOf(q, r) { return HEX_NEIGHBOR_OFFSETS.map(n => ({ q: q + n.q, r: r + n.r })); }
 function hexDistance(q1, r1, q2, r2) {
   const s1 = -q1 - r1, s2 = -q2 - r2;
   return Math.max(Math.abs(q1 - q2), Math.abs(r1 - r2), Math.abs(s1 - s2));
 }
+function axialToWorld(q, r) {
+  return { x: HEX_SIZE * 1.5 * q, y: HEX_SIZE * SQRT3 * (r + q / 2) };
+}
+const HEX_CORNER_OFFSETS = (() => {
+  const offsets = [];
+  for (let i = 0; i < 6; i++) {
+    const a = (Math.PI / 180) * (60 * i);
+    offsets.push({ x: HEX_SIZE * Math.cos(a), y: HEX_SIZE * Math.sin(a) });
+  }
+  return offsets;
+})();
 
 // ============================================================
-// Hex board generation
-// ------------------------------------------------------------
-// Axial coords (q, r) centered at origin. Hex-shape filter:
-//   include (q, r) where max(|q|, |r|, |-q-r|) <= radius
+// PURE LOGIC — combat, movement, reachability
 // ============================================================
+
+// GDD combat formula (verbatim).
+function resolveCombat(attacker, defender, defenseBonus) {
+  const aMax = UNIT_STATS[attacker.type].hp;
+  const dMax = UNIT_STATS[defender.type].hp;
+  const attackForce = UNIT_STATS[attacker.type].atk * (attacker.hp / aMax);
+  const defenseForce = UNIT_STATS[defender.type].def * (defender.hp / dMax) * defenseBonus;
+  const totalDamage = attackForce + defenseForce;
+  if (totalDamage === 0) return { attackerDamage: 0, defenderDamage: 0 };
+  const defenderDamage = Math.round((attackForce  / totalDamage) * UNIT_STATS[attacker.type].atk * 4.5);
+  const attackerDamage = Math.round((defenseForce / totalDamage) * UNIT_STATS[defender.type].def * 4.5);
+  return { attackerDamage, defenderDamage };
+}
+
+// BFS over passable tiles for "reachable" within move points.
+// Cannot pass through tiles occupied by any unit (own or enemy).
+// Cannot end on a tile occupied by any unit.
+function reachableTiles(state, unit) {
+  const startKey = `${unit.q},${unit.r}`;
+  const visited = new Map(); // key → cost
+  visited.set(startKey, 0);
+  const queue = [{ q: unit.q, r: unit.r, cost: 0 }];
+  const move = UNIT_STATS[unit.type].move;
+  while (queue.length) {
+    const { q, r, cost } = queue.shift();
+    if (cost >= move) continue;
+    for (const { q: nq, r: nr } of neighborsOf(q, r)) {
+      const k = `${nq},${nr}`;
+      if (visited.has(k)) continue;
+      const tile = state.tileAt(nq, nr);
+      if (!tile) continue;
+      if (!tile.type.passable) continue;
+      // Can't step onto any unit
+      if (state.unitAt(nq, nr)) continue;
+      visited.set(k, cost + 1);
+      queue.push({ q: nq, r: nr, cost: cost + 1 });
+    }
+  }
+  visited.delete(startKey);
+  const out = [];
+  for (const k of visited.keys()) {
+    const [q, r] = k.split(',').map(Number);
+    out.push({ q, r });
+  }
+  return out;
+}
+
+// Tiles within attack range containing an enemy unit.
+function attackableTiles(state, unit) {
+  const out = [];
+  const range = UNIT_STATS[unit.type].range;
+  for (const u of state.units) {
+    if (u.player === unit.player) continue;
+    const d = hexDistance(unit.q, unit.r, u.q, u.r);
+    if (d <= range && d > 0) out.push({ q: u.q, r: u.r });
+  }
+  return out;
+}
+
+function tileDefenseBonus(tile) {
+  if (tile.hasVillage) return 1.5;
+  return tile.type.defenseBonus;
+}
+
+// ============================================================
+// MAP GENERATION
+// ============================================================
+
 function hexAxialsForRadius(radius) {
   const tiles = [];
   for (let q = -radius; q <= radius; q++) {
     for (let r = -radius; r <= radius; r++) {
       const s = -q - r;
-      if (Math.max(Math.abs(q), Math.abs(r), Math.abs(s)) <= radius) {
-        tiles.push({ q, r });
-      }
+      if (Math.max(Math.abs(q), Math.abs(r), Math.abs(s)) <= radius) tiles.push({ q, r });
     }
   }
   return tiles;
@@ -199,15 +353,9 @@ function generateMap(seed, radius) {
   const rng = mulberry32(seed);
   const cells = hexAxialsForRadius(radius);
 
-  // Drop seed "centers" for each terrain type in axial space
   function pickAxialPoints(n) {
     const pts = [];
-    for (let i = 0; i < n; i++) {
-      pts.push({
-        q: (rng() * 2 - 1) * radius,
-        r: (rng() * 2 - 1) * radius,
-      });
-    }
+    for (let i = 0; i < n; i++) pts.push({ q: (rng() * 2 - 1) * radius, r: (rng() * 2 - 1) * radius });
     return pts;
   }
 
@@ -215,28 +363,31 @@ function generateMap(seed, radius) {
   const treeCenters  = pickAxialPoints(5);
   const mountainCenters = pickAxialPoints(3);
 
+  function minAxialDistance(q, r, points) {
+    let best = Infinity;
+    for (const p of points) {
+      const d = Math.max(Math.abs(q - p.q), Math.abs(r - p.r), Math.abs((q + r) - (p.q + p.r)));
+      if (d < best) best = d;
+    }
+    return best;
+  }
+
   const tiles = cells.map(({ q, r }) => {
     const waterScore = minAxialDistance(q, r, waterCenters) + 0.5 * rng();
     const treeScore  = minAxialDistance(q, r, treeCenters)  + 0.6 * rng();
     const mountScore = minAxialDistance(q, r, mountainCenters) + 0.4 * rng();
-
     let type = TILE.PLAINS;
     if (waterScore < 1.6) type = TILE.WATER;
     else if (mountScore < 1.5) type = TILE.MOUNTAIN;
     else if (treeScore < 1.8) type = TILE.TREES;
-
-    // Edge bias: outer ring pulls toward water so the board reads as
-    // an island rather than abrupt cropping
     const s = -q - r;
     const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
-
-    return { q, r, type, hasVillage: false, isMine: false, hasUnit: null };
+    return { q, r, type, hasVillage: false, ownerPlayer: null };
   });
 
-  // Village placement: pick plains tiles, spaced at least VILLAGE_MIN_DIST hexes apart.
-  // Shuffle the candidate list with the seeded RNG so placement is deterministic.
+  // Villages on plains
   const candidates = tiles.filter(t => t.type === TILE.PLAINS).slice();
   for (let i = candidates.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
@@ -249,96 +400,169 @@ function generateMap(seed, radius) {
     if (ok) { villages.push(c); c.hasVillage = true; }
   }
 
-  // Pick the most central village as "my village"
-  let myVillage = null;
-  if (villages.length > 0) {
-    villages.sort((a, b) => hexDistance(a.q, a.r, 0, 0) - hexDistance(b.q, b.r, 0, 0));
-    myVillage = villages[0];
-    myVillage.isMine = true;
+  // Pick the two most-distant villages as P1 and P2 starts.
+  let p1V = null, p2V = null, best = -1;
+  for (let i = 0; i < villages.length; i++) {
+    for (let j = i + 1; j < villages.length; j++) {
+      const d = hexDistance(villages[i].q, villages[i].r, villages[j].q, villages[j].r);
+      if (d > best) { best = d; p1V = villages[i]; p2V = villages[j]; }
+    }
   }
+  if (p1V) p1V.ownerPlayer = 0;
+  if (p2V) p2V.ownerPlayer = 1;
 
-  return { radius, tiles, seed, villages: villages.length, myVillage };
-}
-
-function minAxialDistance(q, r, points) {
-  let best = Infinity;
-  for (const p of points) {
-    // Approximate axial distance via cube-distance formula
-    const d = Math.max(
-      Math.abs(q - p.q),
-      Math.abs(r - p.r),
-      Math.abs((q + r) - (p.q + p.r))
-    );
-    if (d < best) best = d;
-  }
-  return best;
+  return { radius, tiles, seed };
 }
 
 // ============================================================
-// Hex math (flat-top axial → world coords)
-// ------------------------------------------------------------
-// For flat-top hex with "size" = corner radius:
-//   width  = 2 * size
-//   height = sqrt(3) * size
-//   x = size * 1.5 * q
-//   y = size * sqrt(3) * (r + q/2)
-// Corners at angles 0°, 60°, ..., 300° relative to center.
+// GAME STATE
 // ============================================================
-const SQRT3 = Math.sqrt(3);
 
-function axialToWorld(q, r) {
-  return {
-    x: HEX_SIZE * 1.5 * q,
-    y: HEX_SIZE * SQRT3 * (r + q / 2),
+function newGame(seed) {
+  const map = generateMap(seed, BOARD_RADIUS);
+  const state = {
+    map,
+    units: [],
+    players: [
+      { id: 0, stars: STARTING_STARS },
+      { id: 1, stars: STARTING_STARS },
+    ],
+    currentPlayer: 0,
+    turn: 1,
+    phase: 'play', // 'play' | 'pass' | 'won'
+    winner: null,
+    selected: null, // { kind: 'unit'|'village', q, r }
+    tileAt(q, r) { return this.map.tiles.find(t => t.q === q && t.r === r); },
+    unitAt(q, r) { return this.units.find(u => u.q === q && u.r === r); },
+    villageAt(q, r) { const t = this.tileAt(q, r); return t && t.hasVillage ? t : null; },
+    ownedVillages(playerId) { return this.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId); },
   };
+  return state;
 }
 
-function flatTopCornerOffsets() {
-  // Cached at module level — pure geometry, same every call
-  const offsets = [];
-  for (let i = 0; i < 6; i++) {
-    const a = (Math.PI / 180) * (60 * i);
-    offsets.push({ x: HEX_SIZE * Math.cos(a), y: HEX_SIZE * Math.sin(a) });
-  }
-  return offsets;
+function trainUnit(state, village, type) {
+  const stats = UNIT_STATS[type];
+  const player = state.players[state.currentPlayer];
+  if (village.ownerPlayer !== state.currentPlayer) return false;
+  if (state.unitAt(village.q, village.r)) return false;
+  if (player.stars < stats.cost) return false;
+  player.stars -= stats.cost;
+  state.units.push({
+    id: Math.random().toString(36).slice(2, 9),
+    q: village.q,
+    r: village.r,
+    type,
+    player: state.currentPlayer,
+    hp: stats.hp,
+    canMove: false,
+    canAttack: false, // summoning sickness — no actions on creation turn
+    hasMovedThisTurn: false,
+  });
+  return true;
 }
-const HEX_CORNER_OFFSETS = flatTopCornerOffsets();
+
+function moveUnit(state, unit, toQ, toR) {
+  if (unit.player !== state.currentPlayer) return false;
+  if (!unit.canMove) return false;
+  const tile = state.tileAt(toQ, toR);
+  if (!tile || !tile.type.passable) return false;
+  if (state.unitAt(toQ, toR)) return false;
+  const dist = hexDistance(unit.q, unit.r, toQ, toR);
+  if (dist > UNIT_STATS[unit.type].move) return false;
+  // Verify the dest is in BFS-reachable set
+  const reach = reachableTiles(state, unit);
+  if (!reach.some(t => t.q === toQ && t.r === toR)) return false;
+  unit.q = toQ;
+  unit.r = toR;
+  unit.canMove = false;
+  unit.hasMovedThisTurn = true;
+  // Warriors: moving consumes the action (no attack this turn).
+  // Riders: Dash — can still attack after moving.
+  if (!UNIT_STATS[unit.type].dash) unit.canAttack = false;
+  return true;
+}
+
+function attackUnit(state, attacker, defender) {
+  if (attacker.player !== state.currentPlayer) return null;
+  if (!attacker.canAttack) return null;
+  const dist = hexDistance(attacker.q, attacker.r, defender.q, defender.r);
+  if (dist > UNIT_STATS[attacker.type].range) return null;
+  const defTile = state.tileAt(defender.q, defender.r);
+  const bonus = tileDefenseBonus(defTile);
+  const { attackerDamage, defenderDamage } = resolveCombat(attacker, defender, bonus);
+  defender.hp -= defenderDamage;
+  if (defender.hp > 0) attacker.hp -= attackerDamage; // retaliation only if defender survives
+  attacker.canAttack = false;
+  attacker.canMove = false;
+  const events = [{
+    attackerType: attacker.type,
+    defenderType: defender.type,
+    defenderDamage,
+    attackerDamage: defender.hp > 0 ? attackerDamage : 0,
+    defenderKilled: defender.hp <= 0,
+    attackerKilled: defender.hp > 0 && attacker.hp <= 0,
+  }];
+  state.units = state.units.filter(u => u.hp > 0);
+  return events;
+}
+
+function startTurn(state) {
+  // Star income
+  const owned = state.ownedVillages(state.currentPlayer).length;
+  state.players[state.currentPlayer].stars += STARS_PER_VILLAGE * owned;
+  // Wake up all of this player's units (units trained THIS turn get summoning sickness off next turn)
+  for (const u of state.units) {
+    if (u.player === state.currentPlayer) {
+      u.canMove = true;
+      u.canAttack = true;
+      u.hasMovedThisTurn = false;
+    }
+  }
+}
+
+function endTurn(state) {
+  // Capture: if a unit is standing on an opposing village, capture it.
+  for (const u of state.units) {
+    const v = state.villageAt(u.q, u.r);
+    if (v && v.ownerPlayer !== null && v.ownerPlayer !== u.player) {
+      v.ownerPlayer = u.player;
+    } else if (v && v.ownerPlayer === null) {
+      v.ownerPlayer = u.player;
+    }
+  }
+  // Check win: own at least one village and opponent owns none.
+  for (let p = 0; p < 2; p++) {
+    const opp = 1 - p;
+    const oppOwns = state.map.tiles.some(t => t.hasVillage && t.ownerPlayer === opp);
+    const oppUnits = state.units.some(u => u.player === opp);
+    if (!oppOwns && !oppUnits) {
+      state.phase = 'won';
+      state.winner = p;
+      return;
+    }
+  }
+  // Advance
+  state.currentPlayer = 1 - state.currentPlayer;
+  if (state.currentPlayer === 0) state.turn += 1;
+  state.phase = 'pass';
+  state.selected = null;
+}
 
 // ============================================================
-// Camera (pan + pinch zoom)
-//   World coords = unsquashed hex coords centered on origin.
-//   Screen coords = camera offset + (world * zoom), with Y
-//   scaled by ISO_Y_SCALE uniformly — so positions AND hex
-//   geometry are squashed the same amount. Tessellation holds.
+// CAMERA
 // ============================================================
 const camera = {
-  x: 0, y: 0,    // pan offset in screen coords
-  zoom: 1,
+  x: 0, y: 0, zoom: 1,
   reset() { this.zoom = 1; this.recenter(); },
-  recenter() {
-    // World origin is at the center of the board (hex board centered on (0,0)).
-    // Recenter: world (0,0) → screen center.
-    this.x = canvas.width / dpr / 2;
-    this.y = canvas.height / dpr / 2;
-  }
+  recenter() { this.x = canvas.width / dpr / 2; this.y = canvas.height / dpr / 2; }
 };
 
 function worldToScreen(wx, wy) {
-  return {
-    x: camera.x + wx * camera.zoom,
-    y: camera.y + wy * camera.zoom * ISO_Y_SCALE,
-  };
+  return { x: camera.x + wx * camera.zoom, y: camera.y + wy * camera.zoom * ISO_Y_SCALE };
 }
-
 function screenToWorld(sx, sy) {
-  return {
-    x: (sx - camera.x) / camera.zoom,
-    y: (sy - camera.y) / (camera.zoom * ISO_Y_SCALE),
-  };
+  return { x: (sx - camera.x) / camera.zoom, y: (sy - camera.y) / (camera.zoom * ISO_Y_SCALE) };
 }
-
-// Get the 6 screen corners of a tile (flat-top, projected through camera).
-// Corners are computed in world space (perfect tessellation), then projected.
 function tileScreenCorners(q, r) {
   const w = axialToWorld(q, r);
   const out = [];
@@ -348,14 +572,13 @@ function tileScreenCorners(q, r) {
   }
   return out;
 }
-
 function tileScreenCenter(q, r) {
   const w = axialToWorld(q, r);
   return worldToScreen(w.x, w.y);
 }
 
 // ============================================================
-// Renderer
+// RENDERER
 // ============================================================
 const canvas = document.getElementById('canvas');
 const ctx = canvas.getContext('2d');
@@ -373,265 +596,66 @@ function resizeCanvas() {
 function drawTile(tile) {
   const corners = tileScreenCorners(tile.q, tile.r);
   const center = tileScreenCenter(tile.q, tile.r);
-  const sz = HEX_SIZE * camera.zoom;          // for feature sizing
-  const szY = sz * ISO_Y_SCALE;               // for vertical feature sizing
+  const sz = HEX_SIZE * camera.zoom;
+  const szY = sz * ISO_Y_SCALE;
   const depth = TILE_DEPTH * camera.zoom;
   const type = tile.type;
-
-  // Water sits lower than land — apply Y offset to corners + center
   const sinkY = type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
   const topCorners = corners.map(c => ({ x: c.x, y: c.y + sinkY }));
   const topCenter = { x: center.x, y: center.y + sinkY };
 
-  // ---- Side wall ----
-  // For a flat-top hex (corners 0° right, then CCW), the bottom-front
-  // edge is corners 1 (60°), 2 (120°), 3 (180°). Drop those corners by
-  // `depth` to form the visible front wall.
-  // Two sub-faces with different shading: left-front (1→2) and
-  // right-front (2→3) — fakes a sun-from-upper-left lighting.
-  // For water, render a shallow well so it looks recessed.
+  // Side wall — two faces for sun-from-upper-left shading
   const wallTop = topCorners;
   const wallBot = topCorners.map(c => ({ x: c.x, y: c.y + depth }));
-
-  // Right-front face (corner 1 → 2)
+  // Right-front face (1→2)
   ctx.beginPath();
   ctx.moveTo(wallTop[1].x, wallTop[1].y);
   ctx.lineTo(wallTop[2].x, wallTop[2].y);
   ctx.lineTo(wallBot[2].x, wallBot[2].y);
   ctx.lineTo(wallBot[1].x, wallBot[1].y);
   ctx.closePath();
-  ctx.fillStyle = type.side;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.40)';
-  ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
-  ctx.stroke();
-
-  // Left-front face (corner 2 → 3) — slightly darker (shadowed)
+  ctx.fillStyle = type.side; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.40)'; ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom); ctx.stroke();
+  // Left-front face (2→3)
   ctx.beginPath();
   ctx.moveTo(wallTop[2].x, wallTop[2].y);
   ctx.lineTo(wallTop[3].x, wallTop[3].y);
   ctx.lineTo(wallBot[3].x, wallBot[3].y);
   ctx.lineTo(wallBot[2].x, wallBot[2].y);
   ctx.closePath();
-  ctx.fillStyle = type.side;
-  ctx.fill();
-  ctx.fillStyle = 'rgba(0,0,0,0.20)'; // shadow tint on the left face
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.40)';
-  ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
-  ctx.stroke();
+  ctx.fillStyle = type.side; ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.20)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.40)'; ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom); ctx.stroke();
 
-  // ---- Hex top ----
+  // Hex top
   ctx.beginPath();
   ctx.moveTo(topCorners[0].x, topCorners[0].y);
   for (let i = 1; i < 6; i++) ctx.lineTo(topCorners[i].x, topCorners[i].y);
   ctx.closePath();
-  ctx.fillStyle = type.top;
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.30)';
-  ctx.lineWidth = Math.max(0.6, 1 / camera.zoom);
-  ctx.stroke();
+  ctx.fillStyle = type.top; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.30)'; ctx.lineWidth = Math.max(0.6, 1 / camera.zoom); ctx.stroke();
 
-  // Subtle directional shading on the top — slightly darker on the
-  // right side to fake a sun-from-upper-left light. A thin overlay
-  // gradient is overkill; instead drop a soft right-side tint via
-  // a semi-transparent polygon over the right half of the hex.
+  // Right-half shading
   ctx.save();
   ctx.beginPath();
-  ctx.moveTo(topCorners[0].x, topCorners[0].y);   // right
-  ctx.lineTo(topCorners[1].x, topCorners[1].y);   // upper-right
+  ctx.moveTo(topCorners[0].x, topCorners[0].y);
+  ctx.lineTo(topCorners[1].x, topCorners[1].y);
   ctx.lineTo(topCenter.x, topCenter.y);
-  ctx.lineTo(topCorners[5].x, topCorners[5].y);   // lower-right
+  ctx.lineTo(topCorners[5].x, topCorners[5].y);
   ctx.closePath();
   ctx.fillStyle = 'rgba(0,0,0,0.08)';
   ctx.fill();
   ctx.restore();
 
-  // ---- Feature billboards ----
-  // Drawn from the sunken (water) or surface (land) top center
+  // Features
   if (type === TILE.TREES) drawTreeCluster(topCenter.x, topCenter.y, sz, szY);
   else if (type === TILE.MOUNTAIN) drawMountain(topCenter.x, topCenter.y, sz, szY);
   else if (type === TILE.WATER) drawWaterShine(topCenter.x, topCenter.y, sz, szY);
 
-  // Village on plains
-  if (tile.hasVillage && type === TILE.PLAINS) drawVillage(topCenter.x, topCenter.y, sz, szY, tile.isMine);
-
-  // Unit on top (always last)
-  if (tile.hasUnit) drawUnit(topCenter.x, topCenter.y, sz, szY, tile.hasUnit);
-}
-
-function drawVillage(cx, cy, sz, szY, isMine) {
-  // Small hut: rectangular wall + triangular roof + door.
-  const wallW = sz * 0.46;
-  const wallH = sz * 0.30;
-  const roofH = sz * 0.24;
-  const baseY = cy + szY * 0.10;
-  const wallTop = baseY - wallH;
-
-  // "My village" has a blue roof + lighter walls; other villages stay tan/red
-  const roofColor = isMine ? '#1d4ed8' : '#9a3412';
-  const wallColor = isMine ? '#f1f5f9' : '#e8c79a';
-
-  // Wall (front face)
-  ctx.fillStyle = wallColor;
-  ctx.fillRect(cx - wallW / 2, wallTop, wallW, wallH);
-  ctx.fillStyle = 'rgba(0,0,0,0.22)';
-  ctx.fillRect(cx, wallTop, wallW / 2, wallH);
-  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-  ctx.strokeRect(cx - wallW / 2, wallTop, wallW, wallH);
-
-  // Roof
-  const overhang = sz * 0.05;
-  ctx.beginPath();
-  ctx.moveTo(cx, wallTop - roofH);
-  ctx.lineTo(cx - wallW / 2 - overhang, wallTop);
-  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
-  ctx.closePath();
-  ctx.fillStyle = roofColor;
-  ctx.fill();
-  ctx.beginPath();
-  ctx.moveTo(cx, wallTop - roofH);
-  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
-  ctx.lineTo(cx, wallTop);
-  ctx.closePath();
-  ctx.fillStyle = 'rgba(0,0,0,0.22)';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-  ctx.beginPath();
-  ctx.moveTo(cx, wallTop - roofH);
-  ctx.lineTo(cx - wallW / 2 - overhang, wallTop);
-  ctx.lineTo(cx + wallW / 2 + overhang, wallTop);
-  ctx.closePath();
-  ctx.stroke();
-
-  // Door
-  const doorW = sz * 0.12;
-  const doorH = sz * 0.17;
-  ctx.fillStyle = '#3c2410';
-  ctx.fillRect(cx - doorW / 2, baseY - doorH, doorW, doorH);
-
-  // Flag on my village
-  if (isMine) {
-    const poleX = cx + wallW / 2 + overhang - sz * 0.02;
-    const poleTop = wallTop - roofH - sz * 0.30;
-    ctx.strokeStyle = '#4b5563';
-    ctx.lineWidth = Math.max(0.8, 1.2 / camera.zoom);
-    ctx.beginPath();
-    ctx.moveTo(poleX, wallTop - roofH);
-    ctx.lineTo(poleX, poleTop);
-    ctx.stroke();
-    ctx.fillStyle = '#facc15';
-    ctx.beginPath();
-    ctx.moveTo(poleX, poleTop);
-    ctx.lineTo(poleX + sz * 0.16, poleTop + sz * 0.04);
-    ctx.lineTo(poleX, poleTop + sz * 0.10);
-    ctx.closePath();
-    ctx.fill();
-  }
-}
-
-function drawUnit(cx, cy, sz, szY, unit) {
-  // Both units stand at tile front-center, scaled to read at full board zoom.
-  const baseY = cy + szY * 0.18;
-  if (unit.type === 'warrior') {
-    // Warrior: helmeted head + body + shield + sword
-    const bodyW = sz * 0.20;
-    const bodyH = sz * 0.28;
-    const headR = sz * 0.10;
-    const bodyTop = baseY - bodyH;
-    // Body
-    ctx.fillStyle = '#dc2626';
-    ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
-    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-    ctx.strokeRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
-    // Head
-    ctx.beginPath();
-    ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.fillStyle = '#fde68a';
-    ctx.fill();
-    ctx.stroke();
-    // Helmet (top half of head, gray)
-    ctx.beginPath();
-    ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, Math.PI, 2 * Math.PI);
-    ctx.closePath();
-    ctx.fillStyle = '#6b7280';
-    ctx.fill();
-    ctx.stroke();
-    // Shield (left)
-    ctx.fillStyle = '#a16207';
-    ctx.fillRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
-    ctx.strokeRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
-  } else if (unit.type === 'rider') {
-    // Rider: horse body + rider on top
-    const horseY = baseY - sz * 0.18;
-    const horseW = sz * 0.42;
-    const horseH = sz * 0.16;
-    // Horse body
-    ctx.fillStyle = '#78350f';
-    ctx.fillRect(cx - horseW / 2, horseY, horseW, horseH);
-    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-    ctx.strokeRect(cx - horseW / 2, horseY, horseW, horseH);
-    // Horse legs (4)
-    const legW = sz * 0.04;
-    const legH = sz * 0.10;
-    ctx.fillStyle = '#78350f';
-    ctx.fillRect(cx - horseW / 2 + sz * 0.02, horseY + horseH, legW, legH);
-    ctx.fillRect(cx - horseW / 2 + sz * 0.10, horseY + horseH, legW, legH);
-    ctx.fillRect(cx + horseW / 2 - sz * 0.06, horseY + horseH, legW, legH);
-    ctx.fillRect(cx + horseW / 2 - sz * 0.14, horseY + horseH, legW, legH);
-    // Horse head (small bump on the right)
-    ctx.fillRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
-    ctx.strokeRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
-    // Rider torso
-    const riderW = sz * 0.14;
-    const riderH = sz * 0.18;
-    const riderTop = horseY - riderH;
-    ctx.fillStyle = '#dc2626';
-    ctx.fillRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
-    ctx.strokeRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
-    // Rider head
-    const riderHeadR = sz * 0.08;
-    ctx.beginPath();
-    ctx.arc(cx - sz * 0.04, riderTop - riderHeadR + sz * 0.02, riderHeadR, 0, Math.PI * 2);
-    ctx.closePath();
-    ctx.fillStyle = '#fde68a';
-    ctx.fill();
-    ctx.stroke();
-  }
-}
-
-// Draw a soft territory border around the 6 hexes adjacent to my village.
-function drawTerritory(myVillage) {
-  if (!myVillage) return;
-  const neighbors = neighborsOf(myVillage.q, myVillage.r);
-  // We also want to include the village tile itself in the territory
-  const territory = [{ q: myVillage.q, r: myVillage.r }, ...neighbors]
-    .filter(({ q, r }) => map.tiles.some(t => t.q === q && t.r === r));
-
-  ctx.save();
-  ctx.strokeStyle = 'rgba(250, 204, 21, 0.85)';
-  ctx.lineWidth = Math.max(1.5, 2.2 / camera.zoom);
-  ctx.setLineDash([Math.max(3, 5 / camera.zoom), Math.max(3, 5 / camera.zoom)]);
-  for (const { q, r } of territory) {
-    const tile = map.tiles.find(t => t.q === q && t.r === r);
-    const raw = tileScreenCorners(q, r);
-    const sinkY = tile && tile.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
-    ctx.beginPath();
-    ctx.moveTo(raw[0].x, raw[0].y + sinkY);
-    for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
-    ctx.closePath();
-    ctx.stroke();
-  }
-  ctx.restore();
+  if (tile.hasVillage) drawVillage(topCenter.x, topCenter.y, sz, szY, tile.ownerPlayer);
 }
 
 function drawTreeCluster(cx, cy, sz, szY) {
-  // 3 small trees, slightly offset, with trunk + foliage triangle
   const positions = [
     { dx: -0.20, dy:  0.04, h: 0.38 },
     { dx:  0.22, dy:  0.08, h: 0.46 },
@@ -640,116 +664,226 @@ function drawTreeCluster(cx, cy, sz, szY) {
   for (const p of positions) {
     const x = cx + p.dx * sz;
     const baseY = cy + p.dy * szY;
-    const topY = baseY - p.h * sz; // trees stand UP in screen space, full height
-    // Trunk
+    const topY = baseY - p.h * sz;
     ctx.fillStyle = '#5b3a29';
     ctx.fillRect(x - sz * 0.04, baseY - sz * 0.10, sz * 0.08, sz * 0.10);
-    // Foliage (triangle)
     ctx.beginPath();
     ctx.moveTo(x, topY);
     ctx.lineTo(x - sz * 0.18, baseY - sz * 0.06);
     ctx.lineTo(x + sz * 0.18, baseY - sz * 0.06);
     ctx.closePath();
-    ctx.fillStyle = '#166534';
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.35)';
-    ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-    ctx.stroke();
+    ctx.fillStyle = '#166534'; ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.35)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom); ctx.stroke();
   }
 }
 
 function drawMountain(cx, cy, sz, szY) {
-  // Single triangular peak with snow cap and shaded side
   const baseY = cy + szY * 0.12;
   const peakY = cy - sz * 0.70;
   const baseW = sz * 0.85;
-  // Body
   ctx.beginPath();
   ctx.moveTo(cx, peakY);
   ctx.lineTo(cx - baseW / 2, baseY);
   ctx.lineTo(cx + baseW / 2, baseY);
   ctx.closePath();
-  ctx.fillStyle = '#7c6f5a';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(0,0,0,0.45)';
-  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
-  ctx.stroke();
-  // Snow cap (top ~30%)
+  ctx.fillStyle = '#7c6f5a'; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom); ctx.stroke();
   ctx.beginPath();
   ctx.moveTo(cx, peakY);
   ctx.lineTo(cx - baseW * 0.18, peakY + sz * 0.25);
   ctx.lineTo(cx + baseW * 0.18, peakY + sz * 0.25);
   ctx.closePath();
-  ctx.fillStyle = '#f3f4f6';
-  ctx.fill();
-  // Shadow on right face
+  ctx.fillStyle = '#f3f4f6'; ctx.fill();
   ctx.beginPath();
   ctx.moveTo(cx, peakY);
   ctx.lineTo(cx + baseW / 2, baseY);
   ctx.lineTo(cx, baseY);
   ctx.closePath();
-  ctx.fillStyle = 'rgba(0,0,0,0.18)';
-  ctx.fill();
+  ctx.fillStyle = 'rgba(0,0,0,0.18)'; ctx.fill();
 }
 
 function drawWaterShine(cx, cy, sz, szY) {
   ctx.strokeStyle = 'rgba(255,255,255,0.22)';
   ctx.lineWidth = Math.max(0.6, 1.2 / camera.zoom);
-  ctx.beginPath();
-  ctx.moveTo(cx - sz * 0.32, cy - szY * 0.08);
-  ctx.lineTo(cx + sz * 0.32, cy - szY * 0.08);
-  ctx.stroke();
-  ctx.beginPath();
-  ctx.moveTo(cx - sz * 0.18, cy + szY * 0.12);
-  ctx.lineTo(cx + sz * 0.18, cy + szY * 0.12);
-  ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - sz * 0.32, cy - szY * 0.08); ctx.lineTo(cx + sz * 0.32, cy - szY * 0.08); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx - sz * 0.18, cy + szY * 0.12); ctx.lineTo(cx + sz * 0.18, cy + szY * 0.12); ctx.stroke();
 }
 
-// ============================================================
-// Frame
-// ============================================================
-let map = generateMap(1, BOARD_RADIUS);
-let hovered = null;
+function drawVillage(cx, cy, sz, szY, ownerPlayer) {
+  const wallW = sz * 0.46, wallH = sz * 0.30, roofH = sz * 0.24;
+  const baseY = cy + szY * 0.10;
+  const wallTop = baseY - wallH;
+  const ownerColor = ownerPlayer !== null ? PLAYER_COLORS[ownerPlayer].dark : '#9a3412';
+  const wallColor = ownerPlayer !== null ? '#f1f5f9' : '#e8c79a';
+  ctx.fillStyle = wallColor; ctx.fillRect(cx - wallW / 2, wallTop, wallW, wallH);
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(cx, wallTop, wallW / 2, wallH);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+  ctx.strokeRect(cx - wallW / 2, wallTop, wallW, wallH);
+  const overhang = sz * 0.05;
+  ctx.beginPath(); ctx.moveTo(cx, wallTop - roofH); ctx.lineTo(cx - wallW / 2 - overhang, wallTop); ctx.lineTo(cx + wallW / 2 + overhang, wallTop); ctx.closePath();
+  ctx.fillStyle = ownerColor; ctx.fill();
+  ctx.beginPath(); ctx.moveTo(cx, wallTop - roofH); ctx.lineTo(cx + wallW / 2 + overhang, wallTop); ctx.lineTo(cx, wallTop); ctx.closePath();
+  ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+  ctx.beginPath(); ctx.moveTo(cx, wallTop - roofH); ctx.lineTo(cx - wallW / 2 - overhang, wallTop); ctx.lineTo(cx + wallW / 2 + overhang, wallTop); ctx.closePath(); ctx.stroke();
+  const doorW = sz * 0.12, doorH = sz * 0.17;
+  ctx.fillStyle = '#3c2410'; ctx.fillRect(cx - doorW / 2, baseY - doorH, doorW, doorH);
+  if (ownerPlayer !== null) {
+    const poleX = cx + wallW / 2 + overhang - sz * 0.02;
+    const poleTop = wallTop - roofH - sz * 0.30;
+    ctx.strokeStyle = '#4b5563'; ctx.lineWidth = Math.max(0.8, 1.2 / camera.zoom);
+    ctx.beginPath(); ctx.moveTo(poleX, wallTop - roofH); ctx.lineTo(poleX, poleTop); ctx.stroke();
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath(); ctx.moveTo(poleX, poleTop); ctx.lineTo(poleX + sz * 0.16, poleTop + sz * 0.04); ctx.lineTo(poleX, poleTop + sz * 0.10); ctx.closePath(); ctx.fill();
+  }
+}
+
+function drawUnit(cx, cy, sz, szY, unit) {
+  const baseY = cy + szY * 0.18;
+  const color = PLAYER_COLORS[unit.player].body;
+  const colorDark = PLAYER_COLORS[unit.player].dark;
+  if (unit.type === 'warrior') {
+    const bodyW = sz * 0.20, bodyH = sz * 0.28, headR = sz * 0.10;
+    const bodyTop = baseY - bodyH;
+    ctx.fillStyle = color; ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.beginPath(); ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = '#fde68a'; ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, Math.PI, 2 * Math.PI); ctx.closePath();
+    ctx.fillStyle = '#6b7280'; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = colorDark;
+    ctx.fillRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
+    ctx.strokeRect(cx - bodyW / 2 - sz * 0.10, bodyTop + sz * 0.04, sz * 0.10, sz * 0.18);
+  } else if (unit.type === 'rider') {
+    const horseY = baseY - sz * 0.18, horseW = sz * 0.42, horseH = sz * 0.16;
+    ctx.fillStyle = '#78350f'; ctx.fillRect(cx - horseW / 2, horseY, horseW, horseH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - horseW / 2, horseY, horseW, horseH);
+    const legW = sz * 0.04, legH = sz * 0.10;
+    ctx.fillStyle = '#78350f';
+    ctx.fillRect(cx - horseW / 2 + sz * 0.02, horseY + horseH, legW, legH);
+    ctx.fillRect(cx - horseW / 2 + sz * 0.10, horseY + horseH, legW, legH);
+    ctx.fillRect(cx + horseW / 2 - sz * 0.06, horseY + horseH, legW, legH);
+    ctx.fillRect(cx + horseW / 2 - sz * 0.14, horseY + horseH, legW, legH);
+    ctx.fillRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
+    ctx.strokeRect(cx + horseW / 2 - sz * 0.02, horseY - sz * 0.06, sz * 0.10, sz * 0.10);
+    const riderW = sz * 0.14, riderH = sz * 0.18;
+    const riderTop = horseY - riderH;
+    ctx.fillStyle = color; ctx.fillRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
+    ctx.strokeRect(cx - riderW / 2 - sz * 0.04, riderTop, riderW, riderH);
+    const riderHeadR = sz * 0.08;
+    ctx.beginPath(); ctx.arc(cx - sz * 0.04, riderTop - riderHeadR + sz * 0.02, riderHeadR, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = '#fde68a'; ctx.fill(); ctx.stroke();
+  }
+
+  // HP bar above unit
+  const stats = UNIT_STATS[unit.type];
+  const barW = sz * 0.50;
+  const barH = sz * 0.07;
+  const barY = baseY - sz * 0.95;
+  ctx.fillStyle = 'rgba(0,0,0,0.55)';
+  ctx.fillRect(cx - barW / 2, barY, barW, barH);
+  ctx.fillStyle = unit.hp / stats.hp > 0.5 ? '#22c55e' : (unit.hp / stats.hp > 0.25 ? '#eab308' : '#dc2626');
+  ctx.fillRect(cx - barW / 2, barY, barW * (unit.hp / stats.hp), barH);
+  ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = Math.max(0.4, 0.5 / camera.zoom);
+  ctx.strokeRect(cx - barW / 2, barY, barW, barH);
+
+  // Summoning sickness indicator (small grey dot)
+  if (!unit.canMove && !unit.canAttack && !unit.hasMovedThisTurn) {
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.beginPath();
+    ctx.arc(cx + sz * 0.30, barY + barH / 2, sz * 0.06, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#facc15';
+    ctx.beginPath();
+    ctx.arc(cx + sz * 0.30, barY + barH / 2, sz * 0.05, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawHexRingAt(q, r, color, lineWidth, dashed) {
+  const tile = game.tileAt(q, r);
+  const raw = tileScreenCorners(q, r);
+  const sinkY = tile && tile.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = lineWidth;
+  if (dashed) ctx.setLineDash([Math.max(3, 5 / camera.zoom), Math.max(3, 5 / camera.zoom)]);
+  ctx.beginPath();
+  ctx.moveTo(raw[0].x, raw[0].y + sinkY);
+  for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
+  ctx.closePath();
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawHexFillAt(q, r, fillColor) {
+  const tile = game.tileAt(q, r);
+  const raw = tileScreenCorners(q, r);
+  const sinkY = tile && tile.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
+  ctx.save();
+  ctx.fillStyle = fillColor;
+  ctx.beginPath();
+  ctx.moveTo(raw[0].x, raw[0].y + sinkY);
+  for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
 
 function draw() {
   ctx.fillStyle = '#0b1220';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
-  // Render order: back (small projected y) first, front later, so
-  // mountain peaks and tile sides correctly overlap.
-  const sorted = [...map.tiles].sort((a, b) => {
+  const sorted = [...game.map.tiles].sort((a, b) => {
     const aw = axialToWorld(a.q, a.r);
     const bw = axialToWorld(b.q, b.r);
     return aw.y - bw.y;
   });
-
   for (const t of sorted) drawTile(t);
 
-  // Territory border around my village
-  drawTerritory(map.myVillage);
+  // Units rendered after tiles (back-to-front by y)
+  const sortedUnits = [...game.units].sort((a, b) => {
+    const aw = axialToWorld(a.q, a.r);
+    const bw = axialToWorld(b.q, b.r);
+    return aw.y - bw.y;
+  });
+  for (const u of sortedUnits) {
+    const c = tileScreenCenter(u.q, u.r);
+    const sinkY = game.tileAt(u.q, u.r).type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
+    drawUnit(c.x, c.y + sinkY, HEX_SIZE * camera.zoom, HEX_SIZE * camera.zoom * ISO_Y_SCALE, u);
+  }
 
-  // Selected ring — follows the visible top edge (apply WATER_SINK for water)
-  if (hovered) {
-    const raw = tileScreenCorners(hovered.q, hovered.r);
-    const sinkY = hovered.type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
-    ctx.beginPath();
-    ctx.moveTo(raw[0].x, raw[0].y + sinkY);
-    for (let i = 1; i < 6; i++) ctx.lineTo(raw[i].x, raw[i].y + sinkY);
-    ctx.closePath();
-    ctx.strokeStyle = '#fcd34d';
-    ctx.lineWidth = 2.5;
-    ctx.stroke();
+  // Highlights for selected unit
+  if (game.selected && game.selected.kind === 'unit') {
+    const u = game.unitAt(game.selected.q, game.selected.r);
+    if (u && u.player === game.currentPlayer) {
+      if (u.canMove) {
+        const moves = reachableTiles(game, u);
+        for (const m of moves) drawHexFillAt(m.q, m.r, 'rgba(59,130,246,0.35)');
+      }
+      if (u.canAttack) {
+        const atks = attackableTiles(game, u);
+        for (const a of atks) drawHexFillAt(a.q, a.r, 'rgba(220,38,38,0.45)');
+      }
+      drawHexRingAt(u.q, u.r, '#facc15', 3, false);
+    }
+  }
+
+  // Highlight selected village
+  if (game.selected && game.selected.kind === 'village') {
+    drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
   }
 }
 
 // ============================================================
-// Hit-testing (screen → tile)
+// INPUT — pan, pinch zoom, tap
 // ============================================================
 function tileAtScreen(sx, sy) {
   const w = screenToWorld(sx, sy);
-  let best = null;
-  let bestDist = Infinity;
-  for (const t of map.tiles) {
+  let best = null, bestDist = Infinity;
+  for (const t of game.map.tiles) {
     const tw = axialToWorld(t.q, t.r);
     const d = Math.hypot(w.x - tw.x, w.y - tw.y);
     if (d < bestDist) { bestDist = d; best = t; }
@@ -758,46 +892,35 @@ function tileAtScreen(sx, sy) {
   return null;
 }
 
-// ============================================================
-// Pointer handling — 1 finger pan/tap, 2 fingers pinch zoom
-// ============================================================
 const pointers = new Map();
-let pinchBaseDist = 0;
-let pinchBaseZoom = 1;
-let pinchBaseCenter = { x: 0, y: 0 };
-let panBase = null;
-let didDrag = false;
+let pinchBaseDist = 0, pinchBaseZoom = 1, pinchBaseCenter = { x: 0, y: 0 };
+let panBase = null, didDrag = false;
 
 function pointerDown(e) {
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   didDrag = false;
-  if (pointers.size === 1) {
-    panBase = { x: e.clientX, y: e.clientY, camX: camera.x, camY: camera.y };
-  } else if (pointers.size === 2) {
+  if (pointers.size === 1) panBase = { x: e.clientX, y: e.clientY, camX: camera.x, camY: camera.y };
+  else if (pointers.size === 2) {
     const [a, b] = [...pointers.values()];
     pinchBaseDist = Math.hypot(a.x - b.x, a.y - b.y);
     pinchBaseZoom = camera.zoom;
     pinchBaseCenter = { x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 };
   }
 }
-
 function pointerMove(e) {
   if (!pointers.has(e.pointerId)) return;
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   if (pointers.size === 1 && panBase) {
-    const dx = e.clientX - panBase.x;
-    const dy = e.clientY - panBase.y;
+    const dx = e.clientX - panBase.x, dy = e.clientY - panBase.y;
     if (Math.abs(dx) > 3 || Math.abs(dy) > 3) didDrag = true;
-    camera.x = panBase.camX + dx;
-    camera.y = panBase.camY + dy;
+    camera.x = panBase.camX + dx; camera.y = panBase.camY + dy;
     draw();
   } else if (pointers.size === 2) {
     const [a, b] = [...pointers.values()];
     const newDist = Math.hypot(a.x - b.x, a.y - b.y);
     if (pinchBaseDist > 0) {
       const newZoom = clamp(pinchBaseZoom * (newDist / pinchBaseDist), 0.4, 3.0);
-      const cx = pinchBaseCenter.x;
-      const cy = pinchBaseCenter.y;
+      const cx = pinchBaseCenter.x, cy = pinchBaseCenter.y;
       const ratio = newZoom / camera.zoom;
       camera.x = cx - (cx - camera.x) * ratio;
       camera.y = cy - (cy - camera.y) * ratio;
@@ -807,30 +930,21 @@ function pointerMove(e) {
     }
   }
 }
-
 function pointerUp(e) {
   const wasOnePointer = pointers.size === 1;
   pointers.delete(e.pointerId);
   if (pointers.size === 0) {
-    if (wasOnePointer && !didDrag) {
-      const t = tileAtScreen(e.clientX, e.clientY);
-      hovered = t;
-      updateHoverLabel();
-      refreshActionPicker();
-      draw();
-    }
+    if (wasOnePointer && !didDrag) handleTap(e.clientX, e.clientY);
     panBase = null;
   } else if (pointers.size === 1) {
     const [p] = [...pointers.values()];
     panBase = { x: p.x, y: p.y, camX: camera.x, camY: camera.y };
   }
 }
-
 function pointerCancel(e) {
   pointers.delete(e.pointerId);
   if (pointers.size === 0) panBase = null;
 }
-
 function wheel(e) {
   e.preventDefault();
   const dir = e.deltaY < 0 ? 1.1 : 1 / 1.1;
@@ -841,9 +955,7 @@ function wheel(e) {
   camera.zoom = newZoom;
   draw();
 }
-
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
-
 canvas.addEventListener('pointerdown', pointerDown);
 canvas.addEventListener('pointermove', pointerMove);
 canvas.addEventListener('pointerup', pointerUp);
@@ -851,93 +963,243 @@ canvas.addEventListener('pointercancel', pointerCancel);
 canvas.addEventListener('wheel', wheel, { passive: false });
 
 // ============================================================
-// UI wiring
+// TAP DISPATCH
+// ============================================================
+function handleTap(sx, sy) {
+  if (game.phase !== 'play') return;
+  const tile = tileAtScreen(sx, sy);
+  if (!tile) {
+    clearSelection();
+    return;
+  }
+  // Currently selected unit → attempt move or attack
+  if (game.selected && game.selected.kind === 'unit') {
+    const sel = game.unitAt(game.selected.q, game.selected.r);
+    if (sel && sel.player === game.currentPlayer) {
+      const targetUnit = game.unitAt(tile.q, tile.r);
+      if (targetUnit && targetUnit.player !== sel.player) {
+        // Attack
+        const events = attackUnit(game, sel, targetUnit);
+        if (events) {
+          showCombatToast(events[0]);
+          clearSelection();
+          checkWin();
+          updateAll();
+          return;
+        }
+      } else if (!targetUnit && sel.canMove) {
+        // Move
+        if (moveUnit(game, sel, tile.q, tile.r)) {
+          // Keep selection so the player sees the unit can still attack (Rider Dash)
+          game.selected = { kind: 'unit', q: sel.q, r: sel.r };
+          updateAll();
+          return;
+        }
+      }
+    }
+  }
+
+  // Select friendly unit
+  const u = game.unitAt(tile.q, tile.r);
+  if (u && u.player === game.currentPlayer) {
+    game.selected = { kind: 'unit', q: tile.q, r: tile.r };
+    updateAll();
+    return;
+  }
+
+  // Select own village
+  if (tile.hasVillage && tile.ownerPlayer === game.currentPlayer) {
+    game.selected = { kind: 'village', q: tile.q, r: tile.r };
+    updateAll();
+    return;
+  }
+
+  // Otherwise clear
+  clearSelection();
+}
+
+function clearSelection() {
+  game.selected = null;
+  updateAll();
+}
+
+// ============================================================
+// UI WIRING
 // ============================================================
 const seedInput = document.getElementById('seedInput');
-const rerollBtn = document.getElementById('rerollBtn');
-const resetViewBtn = document.getElementById('resetViewBtn');
-const hoverLabel = document.getElementById('hoverLabel');
-const dimsLabel = document.getElementById('dimsLabel');
-
-function setSeed(s) {
-  const n = parseInt(s, 10);
-  if (!Number.isFinite(n)) return;
-  map = generateMap(n, BOARD_RADIUS);
-  seedInput.value = String(n);
-  hovered = null;
-  updateHoverLabel();
-  refreshActionPicker();
-  camera.reset();
-  draw();
-}
-
-function reroll() {
-  const n = Math.floor(Math.random() * 1e9);
-  setSeed(n);
-}
-
-seedInput.addEventListener('change', () => setSeed(seedInput.value));
-rerollBtn.addEventListener('click', reroll);
-resetViewBtn.addEventListener('click', () => { camera.reset(); draw(); });
-
-function updateHoverLabel() {
-  if (hovered) {
-    const v = hovered.hasVillage ? (hovered.isMine ? ' + my village' : ' + village') : '';
-    const u = hovered.hasUnit ? ` [${hovered.hasUnit.type}]` : '';
-    hoverLabel.textContent = `(${hovered.q},${hovered.r}) ${hovered.type.label}${v}${u}`;
-  } else hoverLabel.textContent = '—';
-}
-
-// Action picker
+const newGameBtn = document.getElementById('newGameBtn');
+const endTurnBtn = document.getElementById('endTurnBtn');
+const turnPill = document.getElementById('turnPill');
+const hoverPill = document.getElementById('hoverPill');
 const actionPicker = document.getElementById('actionPicker');
+const apTitle = document.getElementById('apTitle');
 const apSub = document.getElementById('apSub');
 const makeWarriorBtn = document.getElementById('makeWarriorBtn');
 const makeRiderBtn = document.getElementById('makeRiderBtn');
 const apCloseBtn = document.getElementById('apCloseBtn');
+const passOverlay = document.getElementById('passOverlay');
+const passTitle = document.getElementById('passTitle');
+const passBtn = document.getElementById('passBtn');
+const winOverlay = document.getElementById('winOverlay');
+const winTitle = document.getElementById('winTitle');
+const winSub = document.getElementById('winSub');
+const winRestartBtn = document.getElementById('winRestartBtn');
+const combatToast = document.getElementById('combatToast');
 
-function refreshActionPicker() {
-  if (hovered && hovered.isMine) {
-    actionPicker.style.display = 'block';
-    const empty = !hovered.hasUnit;
-    apSub.textContent = empty ? 'Empty — train a unit' : `${hovered.hasUnit.type} is here`;
-    makeWarriorBtn.disabled = !empty;
-    makeRiderBtn.disabled = !empty;
-  } else {
-    actionPicker.style.display = 'none';
+let game = newGame(1);
+startTurn(game);
+
+function updateTopBar() {
+  const cp = game.currentPlayer;
+  const pc = PLAYER_COLORS[cp];
+  turnPill.textContent = `${pc.short} · ${game.players[cp].stars}★ · Turn ${game.turn}`;
+  turnPill.className = `pill ${cp === 0 ? 'p1' : 'p2'}`;
+  endTurnBtn.className = `pill primary ${cp === 0 ? '' : 'p2'}`;
+}
+
+function updateHoverPill() {
+  if (game.selected && game.selected.kind === 'unit') {
+    const u = game.unitAt(game.selected.q, game.selected.r);
+    if (u) {
+      const stats = UNIT_STATS[u.type];
+      const status = u.canMove || u.canAttack ? '' : ' (used)';
+      const sick = !u.canMove && !u.canAttack && !u.hasMovedThisTurn ? ' (sickness)' : '';
+      hoverPill.textContent = `${PLAYER_COLORS[u.player].short} ${stats.label} · ${u.hp}/${stats.hp} HP${status}${sick}`;
+      return;
+    }
   }
+  if (game.selected && game.selected.kind === 'village') {
+    const v = game.villageAt(game.selected.q, game.selected.r);
+    if (v) {
+      hoverPill.textContent = `My village · empty: ${!game.unitAt(v.q, v.r)}`;
+      return;
+    }
+  }
+  hoverPill.textContent = 'tap your unit or village';
+}
+
+function updateActionPicker() {
+  if (game.selected && game.selected.kind === 'village') {
+    const v = game.villageAt(game.selected.q, game.selected.r);
+    if (v && v.ownerPlayer === game.currentPlayer) {
+      actionPicker.style.display = 'block';
+      const empty = !game.unitAt(v.q, v.r);
+      const stars = game.players[game.currentPlayer].stars;
+      apTitle.textContent = `${PLAYER_COLORS[game.currentPlayer].short} Village`;
+      apSub.textContent = empty ? `Train a unit (${stars}★ available)` : 'A unit is here';
+      makeWarriorBtn.disabled = !empty || stars < UNIT_STATS.warrior.cost;
+      makeRiderBtn.disabled = !empty || stars < UNIT_STATS.rider.cost;
+      return;
+    }
+  }
+  actionPicker.style.display = 'none';
+}
+
+function updateAll() {
+  updateTopBar();
+  updateHoverPill();
+  updateActionPicker();
+  draw();
 }
 
 makeWarriorBtn.addEventListener('click', () => {
-  if (hovered && hovered.isMine && !hovered.hasUnit) {
-    hovered.hasUnit = { type: 'warrior' };
-    refreshActionPicker();
-    updateHoverLabel();
-    draw();
-  }
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v && trainUnit(game, v, 'warrior')) updateAll();
 });
 makeRiderBtn.addEventListener('click', () => {
-  if (hovered && hovered.isMine && !hovered.hasUnit) {
-    hovered.hasUnit = { type: 'rider' };
-    refreshActionPicker();
-    updateHoverLabel();
-    draw();
-  }
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v && trainUnit(game, v, 'rider')) updateAll();
 });
-apCloseBtn.addEventListener('click', () => {
-  hovered = null;
-  refreshActionPicker();
-  updateHoverLabel();
-  draw();
+apCloseBtn.addEventListener('click', () => { clearSelection(); });
+
+endTurnBtn.addEventListener('click', () => {
+  if (game.phase !== 'play') return;
+  endTurn(game);
+  if (game.phase === 'won') {
+    showWin();
+    return;
+  }
+  showPassScreen();
 });
 
-dimsLabel.textContent = `radius ${BOARD_RADIUS} (${map.tiles.length} tiles)`;
+function showCombatToast(ev) {
+  const a = UNIT_STATS[ev.attackerType].label;
+  const d = UNIT_STATS[ev.defenderType].label;
+  let msg = `${a} hit ${d} for ${ev.defenderDamage}`;
+  if (ev.attackerDamage > 0) msg += `, took ${ev.attackerDamage} back`;
+  if (ev.defenderKilled) msg += ` — killed!`;
+  if (ev.attackerKilled) msg += ` — and died`;
+  combatToast.textContent = msg;
+  combatToast.classList.add('show');
+  setTimeout(() => combatToast.classList.remove('show'), 2200);
+}
+
+function showPassScreen() {
+  const next = game.currentPlayer;
+  const pc = PLAYER_COLORS[next];
+  passTitle.textContent = `Pass to ${pc.label}`;
+  passBtn.textContent = `I'm ${pc.label} — start turn`;
+  passBtn.className = next === 0 ? '' : 'p2';
+  passOverlay.style.display = 'flex';
+}
+passBtn.addEventListener('click', () => {
+  passOverlay.style.display = 'none';
+  game.phase = 'play';
+  startTurn(game);
+  updateAll();
+});
+
+function showWin() {
+  const pc = PLAYER_COLORS[game.winner];
+  winTitle.textContent = `${pc.label} wins!`;
+  winSub.textContent = `Captured the opposing village.`;
+  winOverlay.style.display = 'flex';
+}
+function checkWin() {
+  for (let p = 0; p < 2; p++) {
+    const opp = 1 - p;
+    const oppOwns = game.map.tiles.some(t => t.hasVillage && t.ownerPlayer === opp);
+    const oppUnits = game.units.some(u => u.player === opp);
+    if (!oppOwns && !oppUnits) {
+      game.phase = 'won';
+      game.winner = p;
+      showWin();
+      return;
+    }
+  }
+}
+winRestartBtn.addEventListener('click', () => {
+  winOverlay.style.display = 'none';
+  startNewGame();
+});
+
+function startNewGame() {
+  const seedStr = seedInput.value;
+  let seed = parseInt(seedStr, 10);
+  if (!Number.isFinite(seed)) seed = Math.floor(Math.random() * 1e9);
+  game = newGame(seed);
+  startTurn(game);
+  seedInput.value = String(seed);
+  camera.reset();
+  updateAll();
+}
+newGameBtn.addEventListener('click', () => {
+  const n = Math.floor(Math.random() * 1e9);
+  seedInput.value = String(n);
+  startNewGame();
+});
+seedInput.addEventListener('change', startNewGame);
 
 // ============================================================
-// Boot
+// BOOT
 // ============================================================
 window.addEventListener('resize', () => { resizeCanvas(); camera.recenter(); draw(); });
 resizeCanvas();
-setSeed(1);
+camera.reset();
+seedInput.value = '1';
+updateAll();
 
 </script>
 </body>
