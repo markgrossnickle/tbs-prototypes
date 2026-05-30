@@ -586,16 +586,20 @@ function attackUnit(state, attacker, defender) {
   const bonus = tileDefenseBonus(defTile);
   const { attackerDamage, defenderDamage } = resolveCombat(attacker, defender, bonus);
   defender.hp -= defenderDamage;
-  if (defender.hp > 0) attacker.hp -= attackerDamage; // retaliation only if defender survives
+  // Retaliation: defender must survive AND be able to reach attacker within
+  // its own range. Polytopia-faithful — melee can't reply to a ranged attack.
+  const defenderCanReach = dist <= UNIT_STATS[defender.type].range;
+  const retaliates = defender.hp > 0 && defenderCanReach;
+  if (retaliates) attacker.hp -= attackerDamage;
   attacker.canAttack = false;
   attacker.canMove = false;
   const events = [{
     attackerType: attacker.type,
     defenderType: defender.type,
     defenderDamage,
-    attackerDamage: defender.hp > 0 ? attackerDamage : 0,
+    attackerDamage: retaliates ? attackerDamage : 0,
     defenderKilled: defender.hp <= 0,
-    attackerKilled: defender.hp > 0 && attacker.hp <= 0,
+    attackerKilled: retaliates && attacker.hp <= 0,
   }];
   state.units = state.units.filter(u => u.hp > 0);
   return events;
