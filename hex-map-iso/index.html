@@ -12,8 +12,10 @@
       --line: #1f2a44;
       --text: #e6ecff;
       --muted: #8b9bbf;
-      --p1: #3b82f6;
-      --p2: #dc2626;
+      --p1: #dc2626;
+      --p2: #3b82f6;
+      --brown-light: #c8a878;
+      --brown-dark: #6b3e1f;
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; padding: 0; height: 100%; background: var(--bg); color: var(--text); font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; overscroll-behavior: none; touch-action: none; }
@@ -56,6 +58,21 @@
       pointer-events: none;
     }
     #hoverPill { background: var(--panel); border: 1px solid var(--line); border-radius: 999px; padding: 6px 12px; font-size: 11px; color: var(--muted); pointer-events: auto; }
+    #endTurnBtn {
+      pointer-events: auto;
+      background: var(--p1);
+      color: white;
+      border: none;
+      border-radius: 14px;
+      padding: 14px 32px;
+      font-size: 16px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.4);
+      letter-spacing: 0.5px;
+    }
+    #endTurnBtn.p2 { background: var(--p2); }
+    #endTurnBtn:active { transform: scale(0.97); }
 
     /* Action picker (village or unit) */
     #actionPicker {
@@ -152,13 +169,13 @@
 
   <div id="topBar">
     <div class="pill" id="turnPill">P1 · 5★ · Turn 1</div>
-    <button class="pill primary" id="endTurnBtn">End Turn</button>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
-    <button class="pill" id="newGameBtn">New game</button>
+    <button class="pill" id="newGameBtn">New</button>
   </div>
 
   <div id="bottomBar">
     <span id="hoverPill">tap a hex</span>
+    <button id="endTurnBtn">End Turn</button>
   </div>
 
   <div id="actionPicker">
@@ -239,8 +256,8 @@ const UNIT_STATS = {
 };
 
 const PLAYER_COLORS = {
-  0: { body: '#3b82f6', dark: '#1d4ed8', label: 'Player 1', short: 'P1' },
-  1: { body: '#dc2626', dark: '#991b1b', label: 'Player 2', short: 'P2' },
+  0: { body: '#dc2626', dark: '#991b1b', label: 'Player 1', short: 'P1' }, // RED
+  1: { body: '#3b82f6', dark: '#1d4ed8', label: 'Player 2', short: 'P2' }, // BLUE
 };
 
 // ---- Hex math ----
@@ -318,11 +335,14 @@ function reachableTiles(state, unit) {
 }
 
 // Tiles within attack range containing an enemy unit.
+// Enemy units out of vision are not attackable (you can't see them).
 function attackableTiles(state, unit) {
+  const visible = visibilityForPlayer(state, unit.player);
   const out = [];
   const range = UNIT_STATS[unit.type].range;
   for (const u of state.units) {
     if (u.player === unit.player) continue;
+    if (!isVisible(visible, u.q, u.r)) continue;
     const d = hexDistance(unit.q, unit.r, u.q, u.r);
     if (d <= range && d > 0) out.push({ q: u.q, r: u.r });
   }
@@ -332,6 +352,41 @@ function attackableTiles(state, unit) {
 function tileDefenseBonus(tile) {
   if (tile.hasVillage) return 1.5;
   return tile.type.defenseBonus;
+}
+
+// SC2-style fog of war (per doc 10 §2.1.1):
+//   Terrain & village positions = always public.
+//   Enemy units = visible only when within vision radius of an own unit or
+//                 own village. Vision radius = 1 hex (own tile + neighbors).
+//                 Mountains grant radius 2 — but units don't sit on mountains
+//                 in this prototype, so radius 1 across the board.
+//   "Last seen" memory of enemy units is deferred to v0.2.
+function visibilityForPlayer(state, playerId) {
+  const visible = new Set();
+  const add = (q, r) => visible.add(`${q},${r}`);
+  // Own villages (and their immediate ring)
+  for (const t of state.map.tiles) {
+    if (t.hasVillage && t.ownerPlayer === playerId) {
+      add(t.q, t.r);
+      for (const n of neighborsOf(t.q, t.r)) add(n.q, n.r);
+    }
+  }
+  // Own units (and their immediate ring)
+  for (const u of state.units) {
+    if (u.player === playerId) {
+      add(u.q, u.r);
+      const radius = state.tileAt(u.q, u.r).type === TILE.MOUNTAIN ? 2 : 1;
+      // BFS by hex distance
+      for (const t of state.map.tiles) {
+        if (hexDistance(u.q, u.r, t.q, t.r) <= radius) add(t.q, t.r);
+      }
+    }
+  }
+  return visible;
+}
+
+function isVisible(visibleSet, q, r) {
+  return visibleSet.has(`${q},${r}`);
 }
 
 // ============================================================
@@ -713,8 +768,8 @@ function drawVillage(cx, cy, sz, szY, ownerPlayer) {
   const wallW = sz * 0.46, wallH = sz * 0.30, roofH = sz * 0.24;
   const baseY = cy + szY * 0.10;
   const wallTop = baseY - wallH;
-  const ownerColor = ownerPlayer !== null ? PLAYER_COLORS[ownerPlayer].dark : '#9a3412';
-  const wallColor = ownerPlayer !== null ? '#f1f5f9' : '#e8c79a';
+  const ownerColor = ownerPlayer !== null ? PLAYER_COLORS[ownerPlayer].dark : '#6b3e1f';
+  const wallColor = ownerPlayer !== null ? '#f1f5f9' : '#c8a878';
   ctx.fillStyle = wallColor; ctx.fillRect(cx - wallW / 2, wallTop, wallW, wallH);
   ctx.fillStyle = 'rgba(0,0,0,0.22)'; ctx.fillRect(cx, wallTop, wallW / 2, wallH);
   ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
@@ -836,6 +891,9 @@ function draw() {
   ctx.fillStyle = '#0b1220';
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  // Compute fog visibility for current player
+  const visible = visibilityForPlayer(game, game.currentPlayer);
+
   const sorted = [...game.map.tiles].sort((a, b) => {
     const aw = axialToWorld(a.q, a.r);
     const bw = axialToWorld(b.q, b.r);
@@ -843,35 +901,59 @@ function draw() {
   });
   for (const t of sorted) drawTile(t);
 
-  // Units rendered after tiles (back-to-front by y)
+  // SC2-style fog overlay — dim non-visible tiles (terrain still readable)
+  for (const t of game.map.tiles) {
+    if (!isVisible(visible, t.q, t.r)) {
+      drawHexFillAt(t.q, t.r, 'rgba(11, 18, 32, 0.48)');
+    }
+  }
+
+  // Territory rings around each owned village (player color)
+  for (const t of game.map.tiles) {
+    if (t.hasVillage && t.ownerPlayer !== null) {
+      const color = PLAYER_COLORS[t.ownerPlayer].body;
+      // Thick solid ring around the village tile itself
+      drawHexRingAt(t.q, t.r, color, Math.max(2.5, 3 / camera.zoom), false);
+      // Dashed ring on each adjacent hex (1-tile territory)
+      for (const n of neighborsOf(t.q, t.r)) {
+        const adj = game.tileAt(n.q, n.r);
+        if (!adj) continue;
+        ctx.save();
+        ctx.globalAlpha = 0.7;
+        drawHexRingAt(n.q, n.r, color, Math.max(1.5, 2 / camera.zoom), true);
+        ctx.restore();
+      }
+    }
+  }
+
+  // Units (filter enemy units by visibility)
   const sortedUnits = [...game.units].sort((a, b) => {
     const aw = axialToWorld(a.q, a.r);
     const bw = axialToWorld(b.q, b.r);
     return aw.y - bw.y;
   });
   for (const u of sortedUnits) {
+    if (u.player !== game.currentPlayer && !isVisible(visible, u.q, u.r)) continue;
     const c = tileScreenCenter(u.q, u.r);
     const sinkY = game.tileAt(u.q, u.r).type === TILE.WATER ? WATER_SINK * camera.zoom : 0;
     drawUnit(c.x, c.y + sinkY, HEX_SIZE * camera.zoom, HEX_SIZE * camera.zoom * ISO_Y_SCALE, u);
   }
 
-  // Highlights for selected unit
+  // Selection highlights
   if (game.selected && game.selected.kind === 'unit') {
     const u = game.unitAt(game.selected.q, game.selected.r);
     if (u && u.player === game.currentPlayer) {
       if (u.canMove) {
         const moves = reachableTiles(game, u);
-        for (const m of moves) drawHexFillAt(m.q, m.r, 'rgba(59,130,246,0.35)');
+        for (const m of moves) drawHexFillAt(m.q, m.r, 'rgba(34,197,94,0.30)');
       }
       if (u.canAttack) {
         const atks = attackableTiles(game, u);
-        for (const a of atks) drawHexFillAt(a.q, a.r, 'rgba(220,38,38,0.45)');
+        for (const a of atks) drawHexFillAt(a.q, a.r, 'rgba(250,204,21,0.45)');
       }
       drawHexRingAt(u.q, u.r, '#facc15', 3, false);
     }
   }
-
-  // Highlight selected village
   if (game.selected && game.selected.kind === 'village') {
     drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
   }
@@ -1054,7 +1136,8 @@ function updateTopBar() {
   const pc = PLAYER_COLORS[cp];
   turnPill.textContent = `${pc.short} · ${game.players[cp].stars}★ · Turn ${game.turn}`;
   turnPill.className = `pill ${cp === 0 ? 'p1' : 'p2'}`;
-  endTurnBtn.className = `pill primary ${cp === 0 ? '' : 'p2'}`;
+  endTurnBtn.className = cp === 1 ? 'p2' : '';
+  endTurnBtn.textContent = `End ${pc.short} Turn`;
 }
 
 function updateHoverPill() {
