@@ -9,6 +9,7 @@ Design source-of-truth (GDD, tech spec, AI design, etc.) lives in the private `t
 | Prototype | What it tests | Live |
 |---|---|---|
 | [tech-tree-drag](./tech-tree-drag/) | Drag-line research economy — draw from any owned tech to any target; distance = cost | [▶ Play](https://markgrossnickle.github.io/tbs-prototypes/tech-tree-drag/) |
+| [hex-map-iso](./hex-map-iso/) | 12×12 hex map at slight iso angle; mobile pan + pinch zoom; 4 terrain types | [▶ Play](https://markgrossnickle.github.io/tbs-prototypes/hex-map-iso/) |
 
 ## Add another prototype
 
