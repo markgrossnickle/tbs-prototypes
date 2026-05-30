@@ -251,6 +251,7 @@ function layout() {
 // ── State ─────────────────────────────────────────────────────────────
 let owned = new Set();
 let spent = 0;
+let connections = []; // [{ fromId, toId }, ...] research lines drawn green after Accept
 let drag = null;    // { fromTech, pointerWorldX, pointerWorldY, hoverTech }
 let pending = null; // { from, to, cost }
 
@@ -265,6 +266,7 @@ function reset() {
   owned.clear();
   owned.add(ORIGIN_ID);
   spent = 0;
+  connections.length = 0;
   fitToView();
   updateHUD();
   draw();
@@ -342,6 +344,23 @@ function draw() {
       ctx.stroke();
     }
   });
+
+  // Solid green connection lines — drawn AFTER a research is accepted,
+  // persistent record of the actual research path. Drawn before nodes
+  // so the nodes sit on top.
+  ctx.strokeStyle = '#22c55e';
+  ctx.lineWidth = 4 / scale;
+  ctx.lineCap = 'round';
+  connections.forEach(c => {
+    const f = TECHS.find(x => x.id === c.fromId);
+    const t = TECHS.find(x => x.id === c.toId);
+    if (!f || !t) return;
+    ctx.beginPath();
+    ctx.moveTo(f.x, f.y);
+    ctx.lineTo(t.x, t.y);
+    ctx.stroke();
+  });
+  ctx.lineCap = 'butt';
 
   // Drag line
   if (drag) {
@@ -605,6 +624,7 @@ function init() {
     if (!pending) return;
     owned.add(pending.to.id);
     spent += pending.cost;
+    connections.push({ fromId: pending.from.id, toId: pending.to.id });
     updateHUD();
     closeModal();
     draw();
