@@ -1780,6 +1780,15 @@ function drawUnit(cx, cy, sz, szY, unit) {
   const baseY = cy + szY * 0.18;
   const color = PLAYER_COLORS[unit.player].body;
   const colorDark = PLAYER_COLORS[unit.player].dark;
+  // Backdrop disc behind the unit so its silhouette stays readable when
+  // the unit is standing on a village hut, especially at low zoom.
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.beginPath();
+  ctx.ellipse(cx, baseY - sz * 0.18, sz * 0.30, sz * 0.30 * ISO_Y_SCALE * 0.7, 0, 0, Math.PI * 2);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
   if (unit.type === 'warrior') {
     const bodyW = sz * 0.20, bodyH = sz * 0.28, headR = sz * 0.10;
     const bodyTop = baseY - bodyH;
