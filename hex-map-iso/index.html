@@ -102,6 +102,30 @@
     .ap-close { width: 100%; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
     .ap-close:hover { color: var(--text); }
 
+    /* Tribe picker — centered modal, same visual language as techPanel. */
+    #tribePicker {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      min-width: 280px;
+      max-width: 380px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      z-index: 42;
+      display: none;
+    }
+    #tribeList { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+    .tribe-row { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; cursor: pointer; }
+    .tribe-row:hover { background: #1a2542; }
+    .tribe-row .tr-swatch { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #0006; flex: 0 0 auto; }
+    .tribe-row .tr-meta { flex: 1 1 auto; min-width: 0; }
+    .tribe-row .tr-name { font-size: 13px; font-weight: 600; }
+    .tribe-row .tr-desc { font-size: 11px; color: var(--muted); }
+
     /* Tech tree panel — centered modal, same visual language as actionPicker */
     #techPanel {
       position: fixed;
@@ -241,6 +265,18 @@
     <div class="ap-sub" id="techSub">5★ each · instant · unlocks a unit</div>
     <div id="techList"></div>
     <button class="ap-close" id="techCloseBtn">Close</button>
+  </div>
+
+  <!--
+    Tribe picker (GDD §5) — shown when starting a new game. Lets P1 (the
+    human) choose a tribe; P2 (the bot or remote) defaults to a different
+    one. Each tribe has ONE distinct passive modifier — see TRIBE_META.
+  -->
+  <div id="tribePicker">
+    <div class="ap-title" id="tribeTitle">Choose Your Tribe</div>
+    <div class="ap-sub" id="tribeSub">P1 (you) — P2 will be a different tribe.</div>
+    <div id="tribeList"></div>
+    <button class="ap-close" id="tribeCancelBtn">Cancel</button>
   </div>
 
   <div id="bottomBar">
@@ -420,6 +456,25 @@ const TECH_META = {
   cavalry:    { label: 'Cavalry',    unlocksLabel: 'Strider',      unitType: 'strider',  color: '#0e7490' },
   psionics:   { label: 'Psionics',   unlocksLabel: 'Empath',       unitType: 'empath',   color: '#a78bfa' },
 };
+// ---- GDD §5 tribe asymmetric mechanics ----
+// Each tribe gets ONE distinct passive (mirrors server/prototype):
+//   - cyborg:   starts with 'riding' researched (Scout available turn 1)
+//   - hive:     warrior costs HIVE_WARRIOR_COST (1) instead of 2
+//   - mycelial: heal +5/+3 instead of +4/+2
+//   - returned: capital vision radius 3 instead of 2
+// Tribes do NOT change UNIT_STATS or unit IDs — small targeted overrides only.
+const TRIBE_IDS = ['cyborg', 'hive', 'mycelial', 'returned'];
+const HIVE_WARRIOR_COST = 1;
+const MYCELIAL_HEAL_OWN = 5;
+const MYCELIAL_HEAL_AWAY = 3;
+const RETURNED_CAPITAL_VISION = 3;
+const TRIBE_META = {
+  cyborg:   { label: 'Cyborg',   color: '#22d3ee', short: 'Cyb',  desc: 'Starts with Mobility — Scout available turn 1.' },
+  hive:     { label: 'Hive',     color: '#facc15', short: 'Hiv',  desc: 'Trooper costs 1★ (instead of 2).' },
+  mycelial: { label: 'Mycelial', color: '#a78bfa', short: 'Myc',  desc: 'Healing +5 in own territory, +3 elsewhere.' },
+  returned: { label: 'Returned', color: '#fb7185', short: 'Ret',  desc: 'Capital vision radius 3 (instead of 2).' },
+};
+
 // unitType → required tech (null = always unlocked).
 const UNIT_TECH_REQUIREMENT = {
   warrior:  null,
@@ -643,10 +698,13 @@ function isOwnTerritory(state, q, r, playerId) {
 function visibilityForPlayer(state, playerId) {
   const visible = new Set();
   const add = (q, r) => visible.add(`${q},${r}`);
-  // Own villages — capital gets radius 2, all others radius 1.
+  // Own villages — capital gets radius 2 (or 3 for Returned tribe per GDD §5);
+  // all other villages radius 1.
+  const player = state.players[playerId];
+  const capitalVision = player && player.tribe === 'returned' ? RETURNED_CAPITAL_VISION : 2;
   for (const t of state.map.tiles) {
     if (t.hasVillage && t.ownerPlayer === playerId) {
-      const r = t.isCapital ? 2 : 1;
+      const r = t.isCapital ? capitalVision : 1;
       for (const tt of state.map.tiles) {
         if (hexDistance(t.q, t.r, tt.q, tt.r) <= r) add(tt.q, tt.r);
       }
@@ -774,14 +832,17 @@ function generateMap(seed, radius) {
 // GAME STATE
 // ============================================================
 
-function newGame(seed) {
+function newGame(seed, p0Tribe = 'cyborg', p1Tribe = 'hive') {
   const map = generateMap(seed, BOARD_RADIUS);
+  // GDD §5 Cyborg: seed researchedTechs with 'riding' so Scout is turn-1 available.
+  const p0Techs = p0Tribe === 'cyborg' ? ['riding'] : [];
+  const p1Techs = p1Tribe === 'cyborg' ? ['riding'] : [];
   const state = {
     map,
     units: [],
     players: [
-      { id: 0, stars: STARTING_STARS, researchedTechs: [] },
-      { id: 1, stars: STARTING_STARS, researchedTechs: [] },
+      { id: 0, stars: STARTING_STARS, researchedTechs: p0Techs, tribe: p0Tribe },
+      { id: 1, stars: STARTING_STARS, researchedTechs: p1Techs, tribe: p1Tribe },
     ],
     currentPlayer: 0,
     turn: 1,
@@ -895,8 +956,13 @@ function trainUnit(state, village, type) {
   // Tech gate (mirrors server rules.ts trainUnit). Warrior is always allowed.
   const required = UNIT_TECH_REQUIREMENT[type];
   if (required && !player.researchedTechs.includes(required)) return false;
-  if (player.stars < stats.cost) return false;
-  player.stars -= stats.cost;
+  // GDD §5 Hive tribe: warrior costs 1★ instead of stats.cost (2). Targeted
+  // override — UNIT_STATS untouched.
+  const cost = player.tribe === 'hive' && type === 'warrior'
+    ? HIVE_WARRIOR_COST
+    : stats.cost;
+  if (player.stars < cost) return false;
+  player.stars -= cost;
   // Deterministic unit ID: turn-player-sequence. No Math.random in rules code
   // per doc 18 §4 / §8 — IDs must replay identically across clients & server.
   const id = `u-${state.turn}-${state.currentPlayer}-${state.nextUnitSeq++}`;
@@ -1015,13 +1081,18 @@ function endTurn(state) {
   // Healing per GDD §2.6: each active-player unit that did NOT move AND
   // did NOT attack heals +4 HP on own-territory tiles (own village or its
   // 1-tile ring), +2 elsewhere. Cap at maxHp.
+  // GDD §5 Mycelial tribe: +5/+3 instead of +4/+2. Targeted override on the
+  // healing constants only — predicate and cap stay identical.
   // Predicate "didn't move/attack" = !hasMovedThisTurn && canAttack.
+  const owner = state.players[state.currentPlayer];
+  const healOwn = owner.tribe === 'mycelial' ? MYCELIAL_HEAL_OWN : 4;
+  const healAway = owner.tribe === 'mycelial' ? MYCELIAL_HEAL_AWAY : 2;
   for (const u of state.units) {
     if (u.player !== state.currentPlayer) continue;
     if (u.hasMovedThisTurn || !u.canAttack) continue;
     const maxHp = UNIT_STATS[u.type].hp;
     if (u.hp >= maxHp) continue;
-    const heal = isOwnTerritory(state, u.q, u.r, u.player) ? 4 : 2;
+    const heal = isOwnTerritory(state, u.q, u.r, u.player) ? healOwn : healAway;
     u.hp = Math.min(maxHp, u.hp + heal);
   }
   // GDD §2.3 city pop growth + level-up. Applied to active player's owned
@@ -1635,13 +1706,16 @@ async function fetchJson(url, opts) {
   return body;
 }
 
-async function netCreateGame(seed) {
+async function netCreateGame(seed, p0Tribe, p1Tribe) {
   const url = `${NET.baseUrl}/games`;
-  const body = JSON.stringify(seed !== undefined ? { seed } : {});
+  const payload = {};
+  if (seed !== undefined) payload.seed = seed;
+  if (p0Tribe) payload.p0Tribe = p0Tribe;
+  if (p1Tribe) payload.p1Tribe = p1Tribe;
   return fetchJson(url, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body,
+    body: JSON.stringify(payload),
   });
 }
 
@@ -1949,14 +2023,14 @@ async function clientEndTurn() {
   }
 }
 
-async function clientStartNewGame(seed) {
+async function clientStartNewGame(seed, p0Tribe, p1Tribe) {
   if (!NET.enabled) {
     // Caller (startNewGame) handles local reset.
     return;
   }
   NET.inFlight = true;
   try {
-    const created = await netCreateGame(seed);
+    const created = await netCreateGame(seed, p0Tribe, p1Tribe);
     NET.gameId = created.gameId;
     // Reflect gameId in the URL so reload preserves the session.
     try {
@@ -2884,7 +2958,11 @@ startTurn(game);
 function updateTopBar() {
   const cp = game.currentPlayer;
   const pc = PLAYER_COLORS[cp];
-  turnPill.textContent = `${pc.short} · ${game.players[cp].stars}★ · Turn ${game.turn}`;
+  // GDD §5: show the active player's tribe on the turn pill so the asymmetric
+  // mechanic is always visible at a glance. Fallback if state predates tribes.
+  const tribe = game.players[cp].tribe;
+  const tribeLabel = tribe && TRIBE_META[tribe] ? ` ${TRIBE_META[tribe].label}` : '';
+  turnPill.textContent = `${pc.short}${tribeLabel} · ${game.players[cp].stars}★ · Turn ${game.turn}`;
   turnPill.className = `pill ${cp === 0 ? 'p1' : 'p2'}`;
   endTurnBtn.className = cp === 1 ? 'p2' : '';
   endTurnBtn.textContent = `End ${pc.short} Turn`;
@@ -3352,32 +3430,92 @@ winRestartBtn.addEventListener('click', () => {
   startNewGame();
 });
 
+// GDD §5 tribe choice persists across re-rolls so re-seeding doesn't ambush
+// the player with a different tribe. Stored in localStorage. Default cyborg
+// for P1; AI/P2 picks a different one (deterministic from P1's pick via the
+// TRIBE_IDS rotation so the same seed + same tribe gives the same matchup).
+let chosenP0Tribe = 'cyborg';
+try {
+  const saved = localStorage.getItem('tbs.p0Tribe');
+  if (saved && TRIBE_IDS.includes(saved)) chosenP0Tribe = saved;
+} catch { /* noop */ }
+
+// Pick a tribe for P2 that differs from P1's. Walks TRIBE_IDS so it's
+// deterministic and easy to extend.
+function pickOpponentTribe(p0) {
+  const idx = TRIBE_IDS.indexOf(p0);
+  return TRIBE_IDS[(idx + 1) % TRIBE_IDS.length];
+}
+
 function startNewGame() {
   const seedStr = seedInput.value;
   let seed = parseInt(seedStr, 10);
   if (!Number.isFinite(seed)) seed = Math.floor(Math.random() * 1e9);
+  const p0Tribe = chosenP0Tribe;
+  const p1Tribe = pickOpponentTribe(p0Tribe);
   if (NET.enabled) {
     // Online: ask the server to create a new game; it owns map gen + state.
     // The seed field is sent so the server can deterministically replay,
-    // but the server controls authoritative state.
+    // but the server controls authoritative state. Tribes are passed too.
     seedInput.value = String(seed);
     camera.reset();
-    clientStartNewGame(seed).catch(err => {
+    clientStartNewGame(seed, p0Tribe, p1Tribe).catch(err => {
       console.warn('Could not start online game:', err);
     });
     return;
   }
-  game = newGame(seed);
+  game = newGame(seed, p0Tribe, p1Tribe);
   startTurn(game);
   seedInput.value = String(seed);
   camera.reset();
   updateAll();
 }
-newGameBtn.addEventListener('click', () => {
-  const n = Math.floor(Math.random() * 1e9);
-  seedInput.value = String(n);
-  startNewGame();
+
+// ---- Tribe picker (GDD §5) ----
+// Opens when "New" is tapped. Lets P1 pick a tribe; P2 is set to a different
+// one via pickOpponentTribe(). Cancel skips the change and just re-rolls.
+const tribePicker = document.getElementById('tribePicker');
+const tribeList = document.getElementById('tribeList');
+const tribeSub = document.getElementById('tribeSub');
+const tribeCancelBtn = document.getElementById('tribeCancelBtn');
+
+function openTribePicker() {
+  // Build the list fresh each open so the swatches/desc reflect TRIBE_META.
+  tribeList.innerHTML = '';
+  for (const id of TRIBE_IDS) {
+    const meta = TRIBE_META[id];
+    const row = document.createElement('div');
+    row.className = 'tribe-row';
+    row.innerHTML = `
+      <div class="tr-swatch" style="background:${meta.color}"></div>
+      <div class="tr-meta">
+        <div class="tr-name">${meta.label}${id === chosenP0Tribe ? ' (current)' : ''}</div>
+        <div class="tr-desc">${meta.desc}</div>
+      </div>
+    `;
+    row.addEventListener('click', () => {
+      chosenP0Tribe = id;
+      try { localStorage.setItem('tbs.p0Tribe', id); } catch { /* noop */ }
+      tribePicker.style.display = 'none';
+      // Re-roll a fresh seed when a tribe is picked from the New flow, so the
+      // map matches the matchup. Persists to seedInput like the old behavior.
+      const n = Math.floor(Math.random() * 1e9);
+      seedInput.value = String(n);
+      startNewGame();
+    });
+    tribeList.appendChild(row);
+  }
+  tribePicker.style.display = 'block';
+}
+tribeCancelBtn.addEventListener('click', () => {
+  tribePicker.style.display = 'none';
 });
+
+newGameBtn.addEventListener('click', () => {
+  openTribePicker();
+});
+// Seed input change still triggers an immediate re-roll using the saved tribe
+// (skipping the picker — user explicitly typed a seed, they want THIS seed).
 seedInput.addEventListener('change', startNewGame);
 
 // Music toggle — also restore on boot from localStorage (off by default).
@@ -3431,9 +3569,14 @@ seedInput.value = '1';
   // newGame(1)` line already ran, so re-roll once we know AI is on.
   AI.enabled = readAiConfigFromUrl();
   refreshAiToggleLabel();
-  if (AI.enabled) {
-    // Re-run map gen with AI flag enabled so capital placement is correct.
-    game = newGame(parseInt(seedInput.value, 10) || 1);
+  // Re-roll the initial game with chosenP0Tribe (restored from localStorage)
+  // — the very first `let game = newGame(1)` ran before this var was declared,
+  // so it used the bare-defaults pair. Doing this unconditionally also picks
+  // up the AI flag's centrality preference inside generateMap.
+  {
+    const p0 = chosenP0Tribe;
+    const p1 = pickOpponentTribe(p0);
+    game = newGame(parseInt(seedInput.value, 10) || 1, p0, p1);
     startTurn(game);
   }
 
@@ -3448,8 +3591,9 @@ seedInput.value = '1';
         NET.gameId = cfg.gameId;
         await netRefreshAndRender();
       } else {
-        // Create a fresh online game.
-        await clientStartNewGame(undefined);
+        // Create a fresh online game — pass chosen tribes (server defaults
+        // mirror the prototype so this is also safe if undefined).
+        await clientStartNewGame(undefined, chosenP0Tribe, pickOpponentTribe(chosenP0Tribe));
       }
       // Poll every 3s for opponent's moves when it isn't our turn.
       setInterval(() => {
