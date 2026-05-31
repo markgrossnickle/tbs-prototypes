@@ -429,7 +429,8 @@ const REWARDS_BY_LEVEL = {
   4: ['population', 'border'],
   5: ['park', 'titan'],
 };
-const IMPLEMENTED_REWARDS = ['workshop', 'wall', 'population', 'park'];
+const IMPLEMENTED_REWARDS = ['workshop', 'wall', 'resources', 'population', 'park'];
+const RESOURCES_REWARD_AMOUNT = 5;
 const REWARD_META = {
   workshop:   { label: 'Workshop',     desc: '+1 SPT' },
   explorer:   { label: 'Explorer',     desc: '(coming soon) reveal fog' },
@@ -912,6 +913,9 @@ function chooseRewardLocal(state, city, reward) {
       break;
     case 'population':
       city.cityPop += POPULATION_REWARD_AMOUNT;
+      break;
+    case 'resources':
+      state.players[state.currentPlayer].stars += RESOURCES_REWARD_AMOUNT;
       break;
     default:
       return false;
@@ -1528,6 +1532,25 @@ function aiPickAdvanceTile(state, unit, enemyCaps) {
 async function aiPlayTurn(state, onAction) {
   if (state.currentPlayer !== AI.player) return;
   const playerId = AI.player;
+
+  // ---- 0. PENDING REWARDS ----
+  // GDD §2.3 cities accumulate pop and gain pending choices. AI must clear
+  // any pending reward before ending the turn or it soft-locks. Preference
+  // order: wall (if unwalled) → resources (+5★) → workshop/park (+1 SPT)
+  // → population (+3 pop).
+  const REWARD_PRIORITY = ['wall', 'resources', 'workshop', 'park', 'population'];
+  let pendingGuard = 0;
+  while (pendingGuard++ < 5) {
+    const city = state.map.tiles.find(t => t.hasVillage && t.ownerPlayer === playerId && t.pendingRewardLevel !== null);
+    if (!city) break;
+    const menu = REWARDS_BY_LEVEL[city.pendingRewardLevel] || [];
+    const viable = REWARD_PRIORITY.filter(r => menu.includes(r) && IMPLEMENTED_REWARDS.includes(r) && !(r === 'wall' && city.hasWall));
+    const pick = viable[0];
+    if (!pick) break; // no implemented option — let it stall rather than infinite-loop
+    if (!chooseRewardLocal(state, city, pick)) break;
+    if (onAction) onAction({ kind: 'reward', reward: pick });
+    await aiSleep(AI.actionDelayMs);
+  }
 
   // ---- 1. ECONOMY: Farm ----
   if (state.players[playerId].stars >= FARM_COST + 2) {
@@ -3190,6 +3213,12 @@ function updateRewardPicker() {
   }
   // Online: only show on YOUR turn.
   if (NET.enabled && !isMyTurn()) {
+    picker.style.display = 'none';
+    return;
+  }
+  // Solo vs-AI: AI runner handles its own reward picks (see ai.ts pendingReward
+  // branch). Don't let the human click through the AI's pending choice.
+  if (AI.enabled && game.currentPlayer === AI.player) {
     picker.style.display = 'none';
     return;
   }
