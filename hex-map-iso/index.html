@@ -204,6 +204,11 @@
         <span class="ap-cost">3★</span>
       </button>
     </div>
+    <button class="ap-btn" id="buildWallBtn" style="width:100%;flex-direction:row;justify-content:center;margin-bottom:8px;">
+      <div class="ap-icon" style="background:#9ca3af"></div>
+      <span>Build Wall</span>
+      <span class="ap-cost">5★</span>
+    </button>
     <button class="ap-close" id="apCloseBtn">Close</button>
   </div>
 
@@ -253,6 +258,49 @@ const VILLAGE_TARGET = 8;
 const VILLAGE_MIN_DIST = 3;
 const STARTING_STARS = 5;
 const STARS_PER_VILLAGE = 2;
+const WALL_COST = 5; // cost in stars to build a wall on an owned village
+
+// ---- SFX ----
+// Lazy-load on first user interaction (iOS / Safari refuses to play audio
+// until a touch event). Each clip is a single shared <audio> element played
+// at moderate volume. Failure to load is silent — gameplay isn't gated on
+// audio working.
+const SFX = {};
+const SFX_FILES = {
+  click:   'sfx/tbs-ui-click.mp3',
+  train:   'sfx/tbs-train.mp3',
+  endTurn: 'sfx/tbs-end-turn.mp3',
+  combat:  'sfx/tbs-combat-hit.mp3',
+  capture: 'sfx/tbs-capture.mp3',
+  build:   'sfx/tbs-build.mp3',
+};
+let sfxUnlocked = false;
+function preloadSfx() {
+  for (const [key, src] of Object.entries(SFX_FILES)) {
+    if (SFX[key]) continue;
+    const a = new Audio(src);
+    a.preload = 'auto';
+    a.volume = 0.45;
+    SFX[key] = a;
+  }
+}
+function unlockSfxOnce() {
+  if (sfxUnlocked) return;
+  sfxUnlocked = true;
+  preloadSfx();
+  // Touch each one to satisfy iOS's "must be triggered from a user gesture" rule
+  for (const a of Object.values(SFX)) {
+    a.play().then(() => { a.pause(); a.currentTime = 0; }).catch(() => {});
+  }
+}
+function playSfx(key) {
+  const src = SFX[key];
+  if (!src) return;
+  // Clone so overlapping triggers don't cut each other off
+  const a = src.cloneNode();
+  a.volume = src.volume;
+  a.play().catch(() => {});
+}
 
 const TILE = {
   WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'water',    passable: false, defenseBonus: 1.0 },
@@ -529,6 +577,16 @@ function newGame(seed) {
     ownedVillages(playerId) { return this.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId); },
   };
   return state;
+}
+
+function buildWallLocal(state, village) {
+  if (village.ownerPlayer !== state.currentPlayer) return false;
+  if (village.hasWall) return false;
+  const player = state.players[state.currentPlayer];
+  if (player.stars < WALL_COST) return false;
+  player.stars -= WALL_COST;
+  village.hasWall = true;
+  return true;
 }
 
 function trainUnit(state, village, type) {
@@ -846,7 +904,7 @@ function isMyTurn() {
 
 async function clientTrainUnit(village, unitType) {
   if (!NET.enabled) {
-    if (trainUnit(game, village, unitType)) updateAll();
+    if (trainUnit(game, village, unitType)) { playSfx('train'); updateAll(); }
     return;
   }
   if (!isMyTurn() || NET.inFlight) return;
@@ -889,7 +947,9 @@ async function clientMoveUnit(unit, toQ, toR) {
 
 async function clientAttackUnit(attacker, defender) {
   if (!NET.enabled) {
-    return attackUnit(game, attacker, defender);
+    const ev = attackUnit(game, attacker, defender);
+    if (ev) playSfx('combat');
+    return ev;
   }
   if (!isMyTurn() || NET.inFlight) return null;
   NET.inFlight = true;
@@ -921,9 +981,39 @@ async function clientAttackUnit(attacker, defender) {
   }
 }
 
+async function clientBuildWall(village) {
+  if (!NET.enabled) {
+    if (buildWallLocal(game, village)) { playSfx('build'); updateAll(); }
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'BuildWall',
+      village: { q: village.q, r: village.r },
+    });
+    playSfx('build');
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('BuildWall failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
 async function clientEndTurn() {
   if (!NET.enabled) {
+    const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
     endTurn(game);
+    playSfx('endTurn');
+    // Detect any village captured during this end-turn → play capture jingle
+    const captured = game.map.tiles.some(t => {
+      if (!t.hasVillage) return false;
+      const prev = before.find(b => b.q === t.q && b.r === t.r);
+      return prev && prev.owner !== t.ownerPlayer;
+    });
+    if (captured) setTimeout(() => playSfx('capture'), 250);
     return;
   }
   if (!isMyTurn() || NET.inFlight) return;
@@ -1445,6 +1535,7 @@ let pinchBaseDist = 0, pinchBaseZoom = 1, pinchBaseCenter = { x: 0, y: 0 };
 let panBase = null, didDrag = false;
 
 function pointerDown(e) {
+  unlockSfxOnce();
   pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
   didDrag = false;
   if (pointers.size === 1) panBase = { x: e.clientX, y: e.clientY, camX: camera.x, camY: camera.y };
@@ -1675,6 +1766,11 @@ function updateActionPicker() {
       makeRiderBtn.disabled = !empty || stars < UNIT_STATS.rider.cost;
       makeArcherBtn.disabled = !empty || stars < UNIT_STATS.archer.cost;
       makeDefenderBtn.disabled = !empty || stars < UNIT_STATS.defender.cost;
+      const wallBtn = document.getElementById('buildWallBtn');
+      if (wallBtn) {
+        wallBtn.disabled = v.hasWall || stars < WALL_COST;
+        wallBtn.querySelector('span:nth-child(2)').textContent = v.hasWall ? 'Walled' : 'Build Wall';
+      }
       return;
     }
   }
@@ -1707,6 +1803,12 @@ makeDefenderBtn.addEventListener('click', () => {
   if (!game.selected) return;
   const v = game.villageAt(game.selected.q, game.selected.r);
   if (v) clientTrainUnit(v, 'defender');
+});
+const buildWallBtn = document.getElementById('buildWallBtn');
+buildWallBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientBuildWall(v);
 });
 apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
