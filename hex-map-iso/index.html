@@ -102,6 +102,33 @@
     .ap-close { width: 100%; background: transparent; color: var(--muted); border: 1px solid var(--line); border-radius: 8px; padding: 5px 10px; font-size: 11px; cursor: pointer; }
     .ap-close:hover { color: var(--text); }
 
+    /* Tech tree panel — centered modal, same visual language as actionPicker */
+    #techPanel {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      min-width: 260px;
+      max-width: 360px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      z-index: 40;
+      display: none;
+    }
+    #techList { display: flex; flex-direction: column; gap: 8px; margin-bottom: 10px; }
+    .tech-row { display: flex; align-items: center; gap: 10px; background: var(--bg); border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px; }
+    .tech-row .t-icon { width: 18px; height: 18px; border-radius: 4px; border: 1px solid #0006; flex: 0 0 auto; }
+    .tech-row .t-meta { flex: 1 1 auto; min-width: 0; }
+    .tech-row .t-name { font-size: 13px; font-weight: 600; }
+    .tech-row .t-sub { font-size: 11px; color: var(--muted); }
+    .tech-row button { background: var(--p2); color: white; border: none; border-radius: 8px; padding: 6px 10px; font-size: 11px; font-weight: 600; cursor: pointer; flex: 0 0 auto; }
+    .tech-row button:disabled { background: #2a3550; color: var(--muted); cursor: not-allowed; }
+    .tech-row.done { opacity: 0.7; }
+    .tech-row.done .t-done { font-size: 11px; color: #4ade80; font-weight: 600; }
+
     /* Pass-the-device screen */
     #passOverlay {
       position: fixed;
@@ -169,10 +196,23 @@
 
   <div id="topBar">
     <div class="pill" id="turnPill">P1 · 5★ · Turn 1</div>
+    <button class="pill" id="techBtn" title="Tech tree — research to unlock units">Tech</button>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
     <button class="pill" id="newGameBtn">New</button>
     <button class="pill" id="aiToggleBtn" title="Toggle AI opponent (P2)">vs AI: off</button>
     <div class="pill muted" id="modePill" title="Network mode">offline</div>
+  </div>
+
+  <!--
+    Tech tree v0 panel — three flat-cost (5★) instant researches that gate
+    unit production. Riding → Rider, Archery → Archer, Strategy → Defender.
+    Warrior is unlocked from the start. Matches server `Research` intent.
+  -->
+  <div id="techPanel">
+    <div class="ap-title" id="techTitle">Tech Tree</div>
+    <div class="ap-sub" id="techSub">5★ each · instant · unlocks a unit</div>
+    <div id="techList"></div>
+    <button class="ap-close" id="techCloseBtn">Close</button>
   </div>
 
   <div id="bottomBar">
@@ -260,6 +300,25 @@ const VILLAGE_MIN_DIST = 3;
 const STARTING_STARS = 5;
 const STARS_PER_VILLAGE = 2;
 const WALL_COST = 5; // cost in stars to build a wall on an owned village
+
+// ---- Tech tree v0 ----
+// Three flat-cost (5★) instant researches that gate unit production.
+// GDD §2.5 has a per-tier cost formula; deferred for prototype. Mirrors
+// server/src/game/state.ts constants.
+const TECH_COST = 5;
+const TECH_IDS = ['riding', 'archery', 'strategy'];
+const TECH_META = {
+  riding:   { label: 'Riding',   unlocksLabel: 'Rider',    unitType: 'rider',    color: '#78350f' },
+  archery:  { label: 'Archery',  unlocksLabel: 'Archer',   unitType: 'archer',   color: '#15803d' },
+  strategy: { label: 'Strategy', unlocksLabel: 'Defender', unitType: 'defender', color: '#6b7280' },
+};
+// unitType → required tech (null = always unlocked).
+const UNIT_TECH_REQUIREMENT = {
+  warrior: null,
+  rider: 'riding',
+  archer: 'archery',
+  defender: 'strategy',
+};
 
 // ---- SFX ----
 // Lazy-load on first user interaction (iOS / Safari refuses to play audio
@@ -570,8 +629,8 @@ function newGame(seed) {
     map,
     units: [],
     players: [
-      { id: 0, stars: STARTING_STARS },
-      { id: 1, stars: STARTING_STARS },
+      { id: 0, stars: STARTING_STARS, researchedTechs: [] },
+      { id: 1, stars: STARTING_STARS, researchedTechs: [] },
     ],
     currentPlayer: 0,
     turn: 1,
@@ -597,11 +656,24 @@ function buildWallLocal(state, village) {
   return true;
 }
 
+function researchTech(state, tech) {
+  if (!TECH_IDS.includes(tech)) return false;
+  const player = state.players[state.currentPlayer];
+  if (player.researchedTechs.includes(tech)) return false;
+  if (player.stars < TECH_COST) return false;
+  player.stars -= TECH_COST;
+  player.researchedTechs.push(tech);
+  return true;
+}
+
 function trainUnit(state, village, type) {
   const stats = UNIT_STATS[type];
   const player = state.players[state.currentPlayer];
   if (village.ownerPlayer !== state.currentPlayer) return false;
   if (state.unitAt(village.q, village.r)) return false;
+  // Tech gate (mirrors server rules.ts trainUnit). Warrior is always allowed.
+  const required = UNIT_TECH_REQUIREMENT[type];
+  if (required && !player.researchedTechs.includes(required)) return false;
   if (player.stars < stats.cost) return false;
   player.stars -= stats.cost;
   // Deterministic unit ID: turn-player-sequence. No Math.random in rules code
@@ -837,8 +909,16 @@ function aiPlanTraining(state, playerId) {
     .filter(t => !state.unitAt(t.q, t.r))
     .sort((a, b) => (a.q - b.q) || (a.r - b.r));
   const actions = [];
-  const unitTypesByCost = Object.keys(UNIT_STATS).sort((a, b) => UNIT_STATS[a].cost - UNIT_STATS[b].cost);
-  let stars = state.players[playerId].stars;
+  // Tech gate: AI considers only unit types whose required tech is researched.
+  // v0 heuristic is "build cheapest" — with no research the AI sticks to Warriors,
+  // which is fine for now (research strategy is deferred). Documented in spec.
+  const player = state.players[playerId];
+  const unlocked = Object.keys(UNIT_STATS).filter(t => {
+    const req = UNIT_TECH_REQUIREMENT[t];
+    return !req || player.researchedTechs.includes(req);
+  });
+  const unitTypesByCost = unlocked.sort((a, b) => UNIT_STATS[a].cost - UNIT_STATS[b].cost);
+  let stars = player.stars;
   for (const v of villages) {
     // Pick the cheapest affordable — Warrior at 2★ in practice.
     const pick = unitTypesByCost.find(t => UNIT_STATS[t].cost <= stars);
@@ -1222,6 +1302,24 @@ async function clientAttackUnit(attacker, defender) {
   } catch (err) {
     console.warn('Attack failed:', err);
     return null;
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientResearch(tech) {
+  if (!NET.enabled) {
+    if (researchTech(game, tech)) { playSfx('click'); updateAll(); }
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({ kind: 'Research', tech });
+    playSfx('click');
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('Research failed:', err);
   } finally {
     NET.inFlight = false;
   }
@@ -1945,6 +2043,10 @@ const winSub = document.getElementById('winSub');
 const winRestartBtn = document.getElementById('winRestartBtn');
 const combatToast = document.getElementById('combatToast');
 const modePill = document.getElementById('modePill');
+const techBtn = document.getElementById('techBtn');
+const techPanel = document.getElementById('techPanel');
+const techList = document.getElementById('techList');
+const techCloseBtn = document.getElementById('techCloseBtn');
 
 let game = newGame(1);
 startTurn(game);
@@ -1999,6 +2101,25 @@ function updateHoverPill() {
   hoverPill.textContent = 'tap your unit or village';
 }
 
+// Apply tech-gating presentation to a train button: when the unit's tech
+// isn't researched we disable the button, change the cost label to
+// "Need <Tech>", and set a title tooltip. When researched the cost reverts
+// to the unit's star cost.
+function applyTrainBtnGate(btn, unitType, empty, stars, researched) {
+  const required = UNIT_TECH_REQUIREMENT[unitType];
+  const techOk = !required || researched.includes(required);
+  const costSpan = btn.querySelector('.ap-cost');
+  if (!techOk) {
+    btn.disabled = true;
+    if (costSpan) costSpan.textContent = `Need ${TECH_META[required].label}`;
+    btn.title = `Research ${TECH_META[required].label} to unlock ${UNIT_STATS[unitType].label}`;
+  } else {
+    btn.disabled = !empty || stars < UNIT_STATS[unitType].cost;
+    if (costSpan) costSpan.textContent = `${UNIT_STATS[unitType].cost}★`;
+    btn.title = '';
+  }
+}
+
 function updateActionPicker() {
   if (game.selected && game.selected.kind === 'village') {
     const v = game.villageAt(game.selected.q, game.selected.r);
@@ -2006,12 +2127,13 @@ function updateActionPicker() {
       actionPicker.style.display = 'block';
       const empty = !game.unitAt(v.q, v.r);
       const stars = game.players[game.currentPlayer].stars;
+      const researched = game.players[game.currentPlayer].researchedTechs;
       apTitle.textContent = `${PLAYER_COLORS[game.currentPlayer].short} Village`;
       apSub.textContent = empty ? `Train a unit (${stars}★ available)` : 'A unit is here';
-      makeWarriorBtn.disabled = !empty || stars < UNIT_STATS.warrior.cost;
-      makeRiderBtn.disabled = !empty || stars < UNIT_STATS.rider.cost;
-      makeArcherBtn.disabled = !empty || stars < UNIT_STATS.archer.cost;
-      makeDefenderBtn.disabled = !empty || stars < UNIT_STATS.defender.cost;
+      applyTrainBtnGate(makeWarriorBtn,  'warrior',  empty, stars, researched);
+      applyTrainBtnGate(makeRiderBtn,    'rider',    empty, stars, researched);
+      applyTrainBtnGate(makeArcherBtn,   'archer',   empty, stars, researched);
+      applyTrainBtnGate(makeDefenderBtn, 'defender', empty, stars, researched);
       const wallBtn = document.getElementById('buildWallBtn');
       if (wallBtn) {
         wallBtn.disabled = v.hasWall || stars < WALL_COST;
@@ -2023,12 +2145,73 @@ function updateActionPicker() {
   actionPicker.style.display = 'none';
 }
 
+// ---- Tech panel ----
+function renderTechPanel() {
+  const player = game.players[game.currentPlayer];
+  techList.innerHTML = '';
+  for (const id of TECH_IDS) {
+    const meta = TECH_META[id];
+    const done = player.researchedTechs.includes(id);
+    const affordable = player.stars >= TECH_COST;
+    const row = document.createElement('div');
+    row.className = 'tech-row' + (done ? ' done' : '');
+    const icon = document.createElement('div');
+    icon.className = 't-icon';
+    icon.style.background = meta.color;
+    row.appendChild(icon);
+    const metaBox = document.createElement('div');
+    metaBox.className = 't-meta';
+    const name = document.createElement('div');
+    name.className = 't-name';
+    name.textContent = meta.label;
+    const sub = document.createElement('div');
+    sub.className = 't-sub';
+    sub.textContent = done
+      ? `Unlocks ${meta.unlocksLabel} · researched`
+      : `Unlocks ${meta.unlocksLabel} · ${TECH_COST}★`;
+    metaBox.appendChild(name);
+    metaBox.appendChild(sub);
+    row.appendChild(metaBox);
+    if (done) {
+      const tag = document.createElement('span');
+      tag.className = 't-done';
+      tag.textContent = 'OK';
+      row.appendChild(tag);
+    } else {
+      const btn = document.createElement('button');
+      btn.textContent = `Research (${TECH_COST}★)`;
+      btn.disabled = !affordable;
+      btn.addEventListener('click', () => {
+        clientResearch(id);
+        // The click triggers an async network round-trip in online mode;
+        // re-render after the next microtask so updated state shows.
+        setTimeout(() => { if (techPanel.style.display === 'block') renderTechPanel(); }, 0);
+      });
+      row.appendChild(btn);
+    }
+    techList.appendChild(row);
+  }
+}
+
+function openTechPanel() {
+  renderTechPanel();
+  techPanel.style.display = 'block';
+}
+function closeTechPanel() { techPanel.style.display = 'none'; }
+
 function updateAll() {
   updateTopBar();
   updateHoverPill();
   updateActionPicker();
+  if (techPanel && techPanel.style.display === 'block') renderTechPanel();
   draw();
 }
+
+techBtn.addEventListener('click', () => {
+  if (techPanel.style.display === 'block') closeTechPanel();
+  else openTechPanel();
+});
+techCloseBtn.addEventListener('click', closeTechPanel);
 
 makeWarriorBtn.addEventListener('click', () => {
   if (!game.selected) return;
