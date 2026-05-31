@@ -74,8 +74,8 @@
     #endTurnBtn.p2 { background: var(--p2); }
     #endTurnBtn:active { transform: scale(0.97); }
 
-    /* Action picker (village or unit) */
-    #actionPicker {
+    /* Action picker (village, unit, or build-farm plains) */
+    #actionPicker, #farmPicker {
       position: fixed;
       left: 50%;
       transform: translateX(-50%);
@@ -253,6 +253,17 @@
     <button class="ap-close" id="apCloseBtn">Close</button>
   </div>
 
+  <div id="farmPicker">
+    <div class="ap-title" id="fpTitle">Plains (your territory)</div>
+    <div class="ap-sub" id="fpSub">Build a farm for +1★/turn</div>
+    <button class="ap-btn" id="buildFarmBtn" style="width:100%;flex-direction:row;justify-content:center;margin-bottom:8px;">
+      <div class="ap-icon" style="background:#facc15"></div>
+      <span>Build Farm</span>
+      <span class="ap-cost">5★</span>
+    </button>
+    <button class="ap-close" id="fpCloseBtn">Close</button>
+  </div>
+
   <div id="passOverlay">
     <h1 id="passTitle">Pass to Player 2</h1>
     <p>Hand the device over. Tap the button below when ready.</p>
@@ -300,6 +311,11 @@ const VILLAGE_MIN_DIST = 3;
 const STARTING_STARS = 5;
 const STARS_PER_VILLAGE = 2;
 const WALL_COST = 5; // cost in stars to build a wall on an owned village
+// Farm improvement (prototype v0; GDD silent). Built on plains in own
+// territory. +1★/turn paid to whichever player currently controls the
+// territory the farm sits in. Mirrors server FARM_COST/STARS_PER_FARM.
+const FARM_COST = 5;
+const STARS_PER_FARM = 1;
 
 // ---- Tech tree v0 ----
 // Three flat-cost (5★) instant researches that gate unit production.
@@ -573,7 +589,7 @@ function generateMap(seed, radius) {
     const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
-    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false, hasWall: false };
+    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false, hasWall: false, hasFarm: false };
   });
 
   // Villages on plains
@@ -642,6 +658,10 @@ function newGame(seed) {
     unitAt(q, r) { return this.units.find(u => u.q === q && u.r === r); },
     villageAt(q, r) { const t = this.tileAt(q, r); return t && t.hasVillage ? t : null; },
     ownedVillages(playerId) { return this.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId); },
+    // Farms "owned" by a player = farms currently sitting in that player's
+    // territory (within 1 hex of an owned village). Recomputed each call —
+    // farm tiles store no explicit ownership, so capture-and-flip Just Works.
+    ownedFarms(playerId) { return this.map.tiles.filter(t => t.hasFarm && isOwnTerritory(this, t.q, t.r, playerId)); },
   };
   return state;
 }
@@ -653,6 +673,21 @@ function buildWallLocal(state, village) {
   if (player.stars < WALL_COST) return false;
   player.stars -= WALL_COST;
   village.hasWall = true;
+  return true;
+}
+
+// BuildFarm: tile must be plains, not already farmed or a village, and must
+// sit in current player's territory (within 1 hex of an owned village).
+// Mirrors server rules.ts buildFarm exactly. Returns true on success.
+function buildFarmLocal(state, tile) {
+  if (!tile) return false;
+  if (tile.type !== TILE.PLAINS) return false;
+  if (tile.hasFarm || tile.hasVillage) return false;
+  if (!isOwnTerritory(state, tile.q, tile.r, state.currentPlayer)) return false;
+  const player = state.players[state.currentPlayer];
+  if (player.stars < FARM_COST) return false;
+  player.stars -= FARM_COST;
+  tile.hasFarm = true;
   return true;
 }
 
@@ -747,9 +782,12 @@ function attackUnit(state, attacker, defender) {
 }
 
 function startTurn(state) {
-  // Star income
+  // Star income — villages (+2★) + farms (+1★).
+  // Farm income goes to whichever player's territory the farm sits in NOW,
+  // recomputed each call (see ownedFarms in state). Mirrors server rules.ts.
   const owned = state.ownedVillages(state.currentPlayer).length;
-  state.players[state.currentPlayer].stars += STARS_PER_VILLAGE * owned;
+  const farms = state.ownedFarms(state.currentPlayer).length;
+  state.players[state.currentPlayer].stars += STARS_PER_VILLAGE * owned + STARS_PER_FARM * farms;
   // Wake up all of this player's units (units trained THIS turn get summoning sickness off next turn)
   for (const u of state.units) {
     if (u.player === state.currentPlayer) {
@@ -1171,6 +1209,7 @@ function adoptServerView(view, header) {
       ownerPlayer: t.ownerPlayer,
       isCapital: !!t.isCapital,
       hasWall: !!t.hasWall,
+      hasFarm: !!t.hasFarm,
     };
   });
   const state = {
@@ -1189,6 +1228,10 @@ function adoptServerView(view, header) {
     unitAt(q, r) { return this.units.find(u => u.q === q && u.r === r); },
     villageAt(q, r) { const t = this.tileAt(q, r); return t && t.hasVillage ? t : null; },
     ownedVillages(playerId) { return this.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId); },
+    // Farms "owned" by a player = farms currently sitting in that player's
+    // territory (within 1 hex of an owned village). Recomputed each call —
+    // farm tiles store no explicit ownership, so capture-and-flip Just Works.
+    ownedFarms(playerId) { return this.map.tiles.filter(t => t.hasFarm && isOwnTerritory(this, t.q, t.r, playerId)); },
   };
   // Recompute can-act flags client-side for UI affordances (visual only;
   // server still authoritatively validates each intent). The server's
@@ -1341,6 +1384,27 @@ async function clientBuildWall(village) {
     await netRefreshAndRender();
   } catch (err) {
     console.warn('BuildWall failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientBuildFarm(tile) {
+  if (!NET.enabled) {
+    if (buildFarmLocal(game, tile)) { playSfx('build'); updateAll(); }
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'BuildFarm',
+      tile: { q: tile.q, r: tile.r },
+    });
+    playSfx('build');
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('BuildFarm failed:', err);
   } finally {
     NET.inFlight = false;
   }
@@ -1501,6 +1565,10 @@ function drawTile(tile) {
   if (tile.hasVillage) {
     if (tile.hasWall) drawWalls(topCorners, sz, depth);
     drawVillage(topCenter.x, topCenter.y, sz, szY, tile.ownerPlayer);
+  } else if (tile.hasFarm) {
+    // Farm improvement (prototype v0). Drawn ONLY on plains-without-village
+    // tiles, which is the only place BuildFarm is legal.
+    drawFarm(topCenter.x, topCenter.y, sz, szY);
   }
 }
 
@@ -1551,6 +1619,46 @@ function drawWalls(topCorners, sz, depth) {
     ctx.lineWidth = Math.max(1, 1.6 / camera.zoom);
     ctx.strokeStyle = wallTopColor;
     ctx.stroke();
+  }
+}
+
+// Farm improvement (prototype v0). A small fenced plot with 3-4 yellow
+// crop rows on a green field, drawn flush to the tile top. No ownership
+// chrome — farm yield follows whichever player currently controls the
+// territory (see startTurn), so showing a permanent flag would mislead.
+function drawFarm(cx, cy, sz, szY) {
+  const plotW = sz * 0.62;
+  const plotH = szY * 0.46;
+  const x0 = cx - plotW / 2;
+  const y0 = cy - plotH / 2 + szY * 0.04;
+  // Green field base.
+  ctx.fillStyle = '#4d7c0f';
+  ctx.fillRect(x0, y0, plotW, plotH);
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+  ctx.strokeRect(x0, y0, plotW, plotH);
+  // Yellow crop rows (3 strips) — running horizontally across the plot.
+  ctx.fillStyle = '#facc15';
+  const rowCount = 3;
+  const rowH = plotH * 0.16;
+  const gap = (plotH - rowCount * rowH) / (rowCount + 1);
+  for (let i = 0; i < rowCount; i++) {
+    const ry = y0 + gap + i * (rowH + gap);
+    ctx.fillRect(x0 + plotW * 0.08, ry, plotW * 0.84, rowH);
+  }
+  // Fence posts (4 corners) — small dark dots.
+  ctx.fillStyle = '#5b3a29';
+  const postR = Math.max(0.6, sz * 0.025);
+  for (const [px, py] of [
+    [x0, y0],
+    [x0 + plotW, y0],
+    [x0, y0 + plotH],
+    [x0 + plotW, y0 + plotH],
+  ]) {
+    ctx.beginPath();
+    ctx.arc(px, py, postR, 0, Math.PI * 2);
+    ctx.closePath();
+    ctx.fill();
   }
 }
 
@@ -1857,6 +1965,11 @@ function draw() {
   if (game.selected && game.selected.kind === 'village') {
     drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
   }
+  if (game.selected && game.selected.kind === 'plains') {
+    // Same chrome as village — the player has chosen a tile, treat selection
+    // identically. (Picker differentiates by available actions.)
+    drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
+  }
 }
 
 // ============================================================
@@ -2009,6 +2122,23 @@ function handleTap(sx, sy) {
     return;
   }
 
+  // Select an empty plains tile inside current player's territory — this is
+  // a Build-Farm candidate. Restricted to plains (per BuildFarm rules) and
+  // tiles without a farm or village. Only on the human's own turn (so the
+  // selection chrome doesn't pop up while the AI is acting).
+  if (
+    tile.type === TILE.PLAINS &&
+    !tile.hasVillage &&
+    !tile.hasFarm &&
+    !u &&
+    isOwnTerritory(game, tile.q, tile.r, game.currentPlayer) &&
+    (!NET.enabled || isMyTurn())
+  ) {
+    game.selected = { kind: 'plains', q: tile.q, r: tile.r };
+    updateAll();
+    return;
+  }
+
   // Otherwise clear
   clearSelection();
 }
@@ -2098,6 +2228,10 @@ function updateHoverPill() {
       return;
     }
   }
+  if (game.selected && game.selected.kind === 'plains') {
+    hoverPill.textContent = `Plains · can build Farm (${FARM_COST}★)`;
+    return;
+  }
   hoverPill.textContent = 'tap your unit or village';
 }
 
@@ -2121,10 +2255,13 @@ function applyTrainBtnGate(btn, unitType, empty, stars, researched) {
 }
 
 function updateActionPicker() {
+  // Default both panels hidden; we'll re-show the appropriate one below.
+  const farmPicker = document.getElementById('farmPicker');
   if (game.selected && game.selected.kind === 'village') {
     const v = game.villageAt(game.selected.q, game.selected.r);
     if (v && v.ownerPlayer === game.currentPlayer) {
       actionPicker.style.display = 'block';
+      if (farmPicker) farmPicker.style.display = 'none';
       const empty = !game.unitAt(v.q, v.r);
       const stars = game.players[game.currentPlayer].stars;
       const researched = game.players[game.currentPlayer].researchedTechs;
@@ -2142,7 +2279,33 @@ function updateActionPicker() {
       return;
     }
   }
+  // Plains selection — show BuildFarm picker if the tile still qualifies.
+  if (game.selected && game.selected.kind === 'plains') {
+    const t = game.tileAt(game.selected.q, game.selected.r);
+    const stars = game.players[game.currentPlayer].stars;
+    if (
+      t &&
+      t.type === TILE.PLAINS &&
+      !t.hasVillage &&
+      !t.hasFarm &&
+      !game.unitAt(t.q, t.r) &&
+      isOwnTerritory(game, t.q, t.r, game.currentPlayer)
+    ) {
+      if (farmPicker) {
+        farmPicker.style.display = 'block';
+        const fpSub = document.getElementById('fpSub');
+        if (fpSub) fpSub.textContent = `Build a farm: +${STARS_PER_FARM}★/turn (${stars}★ available)`;
+        const buildFarmBtn = document.getElementById('buildFarmBtn');
+        if (buildFarmBtn) {
+          buildFarmBtn.disabled = stars < FARM_COST || (NET.enabled && !isMyTurn());
+        }
+      }
+      actionPicker.style.display = 'none';
+      return;
+    }
+  }
   actionPicker.style.display = 'none';
+  if (farmPicker) farmPicker.style.display = 'none';
 }
 
 // ---- Tech panel ----
@@ -2239,6 +2402,18 @@ buildWallBtn.addEventListener('click', () => {
   const v = game.villageAt(game.selected.q, game.selected.r);
   if (v) clientBuildWall(v);
 });
+const buildFarmBtnEl = document.getElementById('buildFarmBtn');
+if (buildFarmBtnEl) {
+  buildFarmBtnEl.addEventListener('click', () => {
+    if (!game.selected || game.selected.kind !== 'plains') return;
+    const t = game.tileAt(game.selected.q, game.selected.r);
+    if (t) clientBuildFarm(t);
+  });
+}
+const fpCloseBtnEl = document.getElementById('fpCloseBtn');
+if (fpCloseBtnEl) {
+  fpCloseBtnEl.addEventListener('click', () => { clearSelection(); });
+}
 apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
 endTurnBtn.addEventListener('click', () => {
