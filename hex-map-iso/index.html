@@ -222,33 +222,33 @@
   </div>
 
   <div id="actionPicker">
-    <div class="ap-title" id="apTitle">My Village</div>
+    <div class="ap-title" id="apTitle">My Outpost</div>
     <div class="ap-sub" id="apSub">Empty — train a unit</div>
     <div class="ap-buttons">
       <button class="ap-btn" id="makeWarriorBtn">
         <div class="ap-icon" style="background:#3b82f6"></div>
-        <span>Warrior</span>
+        <span>Trooper</span>
         <span class="ap-cost">2★</span>
       </button>
       <button class="ap-btn" id="makeRiderBtn">
         <div class="ap-icon" style="background:#78350f"></div>
-        <span>Rider</span>
+        <span>Scout</span>
         <span class="ap-cost">3★</span>
       </button>
       <button class="ap-btn" id="makeArcherBtn">
         <div class="ap-icon" style="background:#15803d"></div>
-        <span>Archer</span>
+        <span>Sniper</span>
         <span class="ap-cost">3★</span>
       </button>
       <button class="ap-btn" id="makeDefenderBtn">
         <div class="ap-icon" style="background:#6b7280"></div>
-        <span>Defender</span>
+        <span>Mech</span>
         <span class="ap-cost">3★</span>
       </button>
     </div>
     <button class="ap-btn" id="buildWallBtn" style="width:100%;flex-direction:row;justify-content:center;margin-bottom:8px;">
       <div class="ap-icon" style="background:#9ca3af"></div>
-      <span>Build Wall</span>
+      <span>Energy Shield</span>
       <span class="ap-cost">5★</span>
     </button>
     <button class="ap-close" id="apCloseBtn">Close</button>
@@ -273,7 +273,7 @@
 
   <div id="winOverlay">
     <h1 id="winTitle">Player 1 wins!</h1>
-    <p id="winSub">Captured the opposing village.</p>
+    <p id="winSub">Captured the opposing capital.</p>
     <button id="winRestartBtn">Play again</button>
   </div>
 
@@ -402,17 +402,17 @@ function setMusic(on) {
 function toggleMusic() { setMusic(!MUSIC.on); }
 
 const TILE = {
-  WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'water',    passable: false, defenseBonus: 1.0 },
-  PLAINS:   { id: 'plains',   top: '#86efac', side: '#4d7c4f', label: 'plains',   passable: true,  defenseBonus: 1.0 },
-  TREES:    { id: 'trees',    top: '#15803d', side: '#14532d', label: 'trees',    passable: true,  defenseBonus: 1.5 },
-  MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'mountain', passable: true,  defenseBonus: 1.5 },
+  WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'plasma',  passable: false, defenseBonus: 1.0 },
+  PLAINS:   { id: 'plains',   top: '#86efac', side: '#4d7c4f', label: 'plains',  passable: true,  defenseBonus: 1.0 },
+  TREES:    { id: 'trees',    top: '#15803d', side: '#14532d', label: 'spires',  passable: true,  defenseBonus: 1.5 },
+  MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'ridgeline', passable: true, defenseBonus: 1.5 },
 };
 
 const UNIT_STATS = {
-  warrior:  { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Warrior'  },
-  rider:    { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Rider'    },
-  archer:   { hp: 10, atk: 2, def: 1, move: 1, range: 2, cost: 3, dash: false, label: 'Archer'   },
-  defender: { hp: 15, atk: 1, def: 3, move: 1, range: 1, cost: 3, dash: false, label: 'Defender' },
+  warrior:  { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Trooper' },
+  rider:    { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Scout'   },
+  archer:   { hp: 10, atk: 2, def: 1, move: 1, range: 2, cost: 3, dash: false, label: 'Sniper'  },
+  defender: { hp: 15, atk: 1, def: 3, move: 1, range: 1, cost: 3, dash: false, label: 'Mech'    },
 };
 
 const PLAYER_COLORS = {
@@ -2287,7 +2287,7 @@ function updateHoverPill() {
   if (game.selected && game.selected.kind === 'village') {
     const v = game.villageAt(game.selected.q, game.selected.r);
     if (v) {
-      hoverPill.textContent = `My village · empty: ${!game.unitAt(v.q, v.r)}`;
+      hoverPill.textContent = `My outpost · empty: ${!game.unitAt(v.q, v.r)}`;
       return;
     }
   }
@@ -2295,7 +2295,7 @@ function updateHoverPill() {
     hoverPill.textContent = `Plains · can build Farm (${FARM_COST}★)`;
     return;
   }
-  hoverPill.textContent = 'tap your unit or village';
+  hoverPill.textContent = 'tap your unit or outpost';
 }
 
 // Apply tech-gating presentation to a train button: when the unit's tech
@@ -2337,7 +2337,7 @@ function updateActionPicker() {
       const wallBtn = document.getElementById('buildWallBtn');
       if (wallBtn) {
         wallBtn.disabled = v.hasWall || stars < WALL_COST;
-        wallBtn.querySelector('span:nth-child(2)').textContent = v.hasWall ? 'Walled' : 'Build Wall';
+        wallBtn.querySelector('span:nth-child(2)').textContent = v.hasWall ? 'Shielded' : 'Energy Shield';
       }
       return;
     }
@@ -2575,7 +2575,7 @@ passBtn.addEventListener('click', () => {
 function showWin() {
   const pc = PLAYER_COLORS[game.winner];
   winTitle.textContent = `${pc.label} wins!`;
-  winSub.textContent = `Captured the opposing village.`;
+  winSub.textContent = `Captured the opposing capital.`;
   winOverlay.style.display = 'flex';
 }
 function checkWin() {
