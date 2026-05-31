@@ -2502,10 +2502,12 @@ async function runAiTurn() {
       showWin();
       return;
     }
-    // Back to human — show pass overlay so they tap to start their turn.
-    // (Could skip too, but pass screen gives a nice visual breath.)
+    // Back to human — in solo vs-AI there's no device to pass, so just
+    // start the human's turn directly. The pass overlay only makes sense
+    // for pass-and-play (two humans on one device).
+    game.phase = 'play';
+    startTurn(game);
     updateAll();
-    showPassScreen();
   } finally {
     AI.acting = false;
   }
