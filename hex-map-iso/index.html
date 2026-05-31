@@ -245,6 +245,26 @@
         <span>Mech</span>
         <span class="ap-cost">3★</span>
       </button>
+      <button class="ap-btn" id="makeMarauderBtn">
+        <div class="ap-icon" style="background:#7c2d12"></div>
+        <span>Marauder</span>
+        <span class="ap-cost">5★</span>
+      </button>
+      <button class="ap-btn" id="makeMortarBtn">
+        <div class="ap-icon" style="background:#374151"></div>
+        <span>Mortar Drone</span>
+        <span class="ap-cost">8★</span>
+      </button>
+      <button class="ap-btn" id="makeStriderBtn">
+        <div class="ap-icon" style="background:#0e7490"></div>
+        <span>Strider</span>
+        <span class="ap-cost">8★</span>
+      </button>
+      <button class="ap-btn" id="makeEmpathBtn">
+        <div class="ap-icon" style="background:#a78bfa"></div>
+        <span>Empath</span>
+        <span class="ap-cost">5★</span>
+      </button>
     </div>
     <button class="ap-btn" id="buildWallBtn" style="width:100%;flex-direction:row;justify-content:center;margin-bottom:8px;">
       <div class="ap-icon" style="background:#9ca3af"></div>
@@ -323,18 +343,26 @@ const STARS_PER_FARM = 1;
 // GDD §2.5 has a per-tier cost formula; deferred for prototype. Mirrors
 // server/src/game/state.ts constants.
 const TECH_COST = 5;
-const TECH_IDS = ['riding', 'archery', 'strategy'];
+const TECH_IDS = ['riding', 'archery', 'strategy', 'smithery', 'ballistics', 'cavalry', 'psionics'];
 const TECH_META = {
-  riding:   { label: 'Riding',   unlocksLabel: 'Rider',    unitType: 'rider',    color: '#78350f' },
-  archery:  { label: 'Archery',  unlocksLabel: 'Archer',   unitType: 'archer',   color: '#15803d' },
-  strategy: { label: 'Strategy', unlocksLabel: 'Defender', unitType: 'defender', color: '#6b7280' },
+  riding:     { label: 'Riding',     unlocksLabel: 'Rider',        unitType: 'rider',    color: '#78350f' },
+  archery:    { label: 'Archery',    unlocksLabel: 'Archer',       unitType: 'archer',   color: '#15803d' },
+  strategy:   { label: 'Strategy',   unlocksLabel: 'Defender',     unitType: 'defender', color: '#6b7280' },
+  smithery:   { label: 'Smithery',   unlocksLabel: 'Marauder',     unitType: 'marauder', color: '#7c2d12' },
+  ballistics: { label: 'Ballistics', unlocksLabel: 'Mortar Drone', unitType: 'mortar',   color: '#374151' },
+  cavalry:    { label: 'Cavalry',    unlocksLabel: 'Strider',      unitType: 'strider',  color: '#0e7490' },
+  psionics:   { label: 'Psionics',   unlocksLabel: 'Empath',       unitType: 'empath',   color: '#a78bfa' },
 };
 // unitType → required tech (null = always unlocked).
 const UNIT_TECH_REQUIREMENT = {
-  warrior: null,
-  rider: 'riding',
-  archer: 'archery',
+  warrior:  null,
+  rider:    'riding',
+  archer:   'archery',
   defender: 'strategy',
+  marauder: 'smithery',
+  mortar:   'ballistics',
+  strider:  'cavalry',
+  empath:   'psionics',
 };
 
 // ---- SFX ----
@@ -408,11 +436,19 @@ const TILE = {
   MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'ridgeline', passable: true, defenseBonus: 1.5 },
 };
 
+// Skills: 'dash' (already-existing field), 'stiff' (defender never retaliates).
+// Strider's atk 3.5 is honored end-to-end by resolveCombat() — the formula
+// is float-then-round, so the half-point shows up in damage variance not
+// in code paths. Same convention as /server/src/game/units.ts.
 const UNIT_STATS = {
-  warrior:  { hp: 10, atk: 2, def: 2, move: 1, range: 1, cost: 2, dash: false, label: 'Trooper' },
-  rider:    { hp: 10, atk: 2, def: 1, move: 2, range: 1, cost: 3, dash: true,  label: 'Scout'   },
-  archer:   { hp: 10, atk: 2, def: 1, move: 1, range: 2, cost: 3, dash: false, label: 'Sniper'  },
-  defender: { hp: 15, atk: 1, def: 3, move: 1, range: 1, cost: 3, dash: false, label: 'Mech'    },
+  warrior:  { hp: 10, atk: 2,   def: 2, move: 1, range: 1, cost: 2, dash: false,                label: 'Trooper'      },
+  rider:    { hp: 10, atk: 2,   def: 1, move: 2, range: 1, cost: 3, dash: true,  skill: 'dash', label: 'Scout'        },
+  archer:   { hp: 10, atk: 2,   def: 1, move: 1, range: 2, cost: 3, dash: false,                label: 'Sniper'       },
+  defender: { hp: 15, atk: 1,   def: 3, move: 1, range: 1, cost: 3, dash: false,                label: 'Mech'         },
+  marauder: { hp: 15, atk: 3,   def: 3, move: 1, range: 1, cost: 5, dash: false,                label: 'Marauder'     },
+  mortar:   { hp: 10, atk: 4,   def: 0, move: 1, range: 3, cost: 8, dash: false, skill: 'stiff', label: 'Mortar Drone' },
+  strider:  { hp: 10, atk: 3.5, def: 1, move: 3, range: 1, cost: 8, dash: true,  skill: 'dash',  label: 'Strider'      },
+  empath:   { hp: 10, atk: 0,   def: 1, move: 1, range: 1, cost: 5, dash: false,                label: 'Empath'       },
 };
 
 const PLAYER_COLORS = {
@@ -496,7 +532,10 @@ function reachableTiles(state, unit) {
 
 // Tiles within attack range containing an enemy unit.
 // Enemy units out of vision are not attackable (you can't see them).
+// Zero-atk units (Empath) have no attackable tiles — mirrors rules.ts which
+// rejects any attack intent from a zero-atk attacker.
 function attackableTiles(state, unit) {
+  if (UNIT_STATS[unit.type].atk === 0) return [];
   const visible = visibilityForPlayer(state, unit.player);
   const out = [];
   const range = UNIT_STATS[unit.type].range;
@@ -775,6 +814,8 @@ function moveUnit(state, unit, toQ, toR) {
 function attackUnit(state, attacker, defender) {
   if (attacker.player !== state.currentPlayer) return null;
   if (!attacker.canAttack) return null;
+  // Empath (atk 0) cannot attack — mirrors server rules.ts CANNOT_ATTACK_ZERO_ATK.
+  if (UNIT_STATS[attacker.type].atk === 0) return null;
   // Vision check (GDD §2.6): ranged units must verify target visibility
   // before firing. Matches server attack() in rules.ts.
   const vis = visibilityForPlayer(state, attacker.player);
@@ -787,8 +828,17 @@ function attackUnit(state, attacker, defender) {
   defender.hp -= defenderDamage;
   // Retaliation: defender must survive AND be able to reach attacker within
   // its own range. Polytopia-faithful — melee can't reply to a ranged attack.
+  // Additional rules:
+  //   - 'stiff' attacker (Mortar Drone) suppresses ALL retaliation regardless
+  //     of distance — slow-firing artillery has no point-blank reaction shot.
+  //   - 0-atk defender (Empath) can't retaliate.
   const defenderCanReach = dist <= UNIT_STATS[defender.type].range;
-  const retaliates = defender.hp > 0 && defenderCanReach;
+  const attackerHasStiff = UNIT_STATS[attacker.type].skill === 'stiff';
+  const defenderCanRetaliate =
+    !attackerHasStiff &&
+    UNIT_STATS[defender.type].atk > 0 &&
+    defenderCanReach;
+  const retaliates = defender.hp > 0 && defenderCanRetaliate;
   if (retaliates) attacker.hp -= attackerDamage;
   attacker.canAttack = false;
   attacker.canMove = false;
@@ -1901,6 +1951,160 @@ function drawUnit(cx, cy, sz, szY, unit) {
     ctx.fillStyle = color;
     ctx.beginPath(); ctx.arc(shieldX + shieldW / 2, shieldY + shieldH / 2, sz * 0.04, 0, Math.PI * 2); ctx.closePath();
     ctx.fill(); ctx.stroke();
+  } else if (unit.type === 'marauder') {
+    // Marauder — heavier armor, larger shield, longer sword (per task spec).
+    const bodyW = sz * 0.30, bodyH = sz * 0.36, headR = sz * 0.12;
+    const bodyTop = baseY - bodyH;
+    ctx.fillStyle = color; ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    // Heavy chest plate.
+    ctx.fillStyle = colorDark;
+    ctx.fillRect(cx - bodyW / 2, bodyTop + sz * 0.08, bodyW, sz * 0.08);
+    ctx.strokeRect(cx - bodyW / 2, bodyTop + sz * 0.08, bodyW, sz * 0.08);
+    // Helmeted head.
+    ctx.beginPath(); ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = '#9ca3af'; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = 'rgba(0,0,0,0.65)';
+    ctx.fillRect(cx - headR * 0.7, bodyTop - headR * 0.55, headR * 1.4, sz * 0.025);
+    // Larger shield (taller than Defender's) on the LEFT.
+    const shieldW = sz * 0.20, shieldH = sz * 0.44;
+    const shieldX = cx - bodyW / 2 - shieldW + sz * 0.02;
+    const shieldY = baseY - shieldH;
+    ctx.fillStyle = colorDark;
+    ctx.fillRect(shieldX, shieldY + sz * 0.04, shieldW, shieldH - sz * 0.04);
+    ctx.beginPath(); ctx.ellipse(shieldX + shieldW / 2, shieldY + sz * 0.04, shieldW / 2, sz * 0.05, 0, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(shieldX, shieldY + sz * 0.04, shieldW, shieldH - sz * 0.04);
+    ctx.beginPath(); ctx.ellipse(shieldX + shieldW / 2, shieldY + sz * 0.04, shieldW / 2, sz * 0.05, 0, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.beginPath(); ctx.arc(shieldX + shieldW / 2, shieldY + shieldH / 2, sz * 0.05, 0, Math.PI * 2); ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Long sword on the right (extends above head).
+    const swordX = cx + bodyW / 2 - sz * 0.01;
+    const swordTop = bodyTop - sz * 0.30;
+    const swordBottom = baseY - sz * 0.04;
+    ctx.strokeStyle = '#e5e7eb'; ctx.lineWidth = Math.max(1.5, 2.2 / camera.zoom);
+    ctx.beginPath(); ctx.moveTo(swordX, swordTop); ctx.lineTo(swordX, swordBottom); ctx.stroke();
+    // Crossguard.
+    ctx.strokeStyle = '#78350f'; ctx.lineWidth = Math.max(1.2, 1.8 / camera.zoom);
+    ctx.beginPath();
+    ctx.moveTo(swordX - sz * 0.06, baseY - sz * 0.10);
+    ctx.lineTo(swordX + sz * 0.06, baseY - sz * 0.10);
+    ctx.stroke();
+  } else if (unit.type === 'mortar') {
+    // Mortar Drone — low tank-like silhouette with upward cannon barrel.
+    const trackW = sz * 0.50, trackH = sz * 0.08;
+    const trackY = baseY - trackH;
+    ctx.fillStyle = '#1f2937'; ctx.fillRect(cx - trackW / 2, trackY, trackW, trackH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.7)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - trackW / 2, trackY, trackW, trackH);
+    // Wheel dots on tracks.
+    ctx.fillStyle = '#4b5563';
+    for (let i = 0; i < 4; i++) {
+      ctx.beginPath();
+      ctx.arc(cx - trackW / 2 + sz * 0.07 + i * sz * 0.12, trackY + trackH / 2, sz * 0.025, 0, Math.PI * 2);
+      ctx.closePath(); ctx.fill();
+    }
+    // Hull (low, wide), player color.
+    const hullW = sz * 0.42, hullH = sz * 0.12;
+    const hullY = trackY - hullH;
+    ctx.fillStyle = color; ctx.fillRect(cx - hullW / 2, hullY, hullW, hullH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - hullW / 2, hullY, hullW, hullH);
+    // Turret stub.
+    const turW = sz * 0.18, turH = sz * 0.08;
+    const turX = cx - turW / 2 - sz * 0.04;
+    const turY = hullY - turH;
+    ctx.fillStyle = colorDark; ctx.fillRect(turX, turY, turW, turH);
+    ctx.strokeRect(turX, turY, turW, turH);
+    // Cannon barrel — angled upward right.
+    const barrelLen = sz * 0.36;
+    const angle = -Math.PI * 0.32;
+    const bx0 = turX + turW * 0.6;
+    const by0 = turY + turH * 0.3;
+    const bx1 = bx0 + Math.cos(angle) * barrelLen;
+    const by1 = by0 + Math.sin(angle) * barrelLen;
+    ctx.strokeStyle = '#374151';
+    ctx.lineWidth = Math.max(3, sz * 0.05);
+    ctx.lineCap = 'round';
+    ctx.beginPath(); ctx.moveTo(bx0, by0); ctx.lineTo(bx1, by1); ctx.stroke();
+    ctx.lineCap = 'butt';
+    // Muzzle ring.
+    ctx.fillStyle = '#111827';
+    ctx.beginPath(); ctx.arc(bx1, by1, sz * 0.04, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+  } else if (unit.type === 'strider') {
+    // Strider — tall, narrow body, long stride pose (legs splayed).
+    const bodyW = sz * 0.14, bodyH = sz * 0.30, headR = sz * 0.08;
+    const bodyTop = baseY - bodyH - sz * 0.18;
+    ctx.fillStyle = color; ctx.fillRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.strokeRect(cx - bodyW / 2, bodyTop, bodyW, bodyH);
+    // Head with visor stripe.
+    ctx.beginPath(); ctx.arc(cx, bodyTop - headR + sz * 0.02, headR, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = '#fde68a'; ctx.fill(); ctx.stroke();
+    ctx.fillStyle = colorDark;
+    ctx.fillRect(cx - headR * 0.9, bodyTop - headR * 0.65, headR * 1.8, sz * 0.03);
+    // Long legs in stride pose.
+    const legW = sz * 0.05;
+    ctx.fillStyle = colorDark;
+    // Front leg (right, forward).
+    ctx.beginPath();
+    ctx.moveTo(cx - legW / 2 + sz * 0.04, bodyTop + bodyH);
+    ctx.lineTo(cx + sz * 0.10, baseY);
+    ctx.lineTo(cx + sz * 0.10 + legW, baseY);
+    ctx.lineTo(cx + legW / 2 + sz * 0.04, bodyTop + bodyH);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Back leg (left, rearward).
+    ctx.beginPath();
+    ctx.moveTo(cx - legW / 2 - sz * 0.04, bodyTop + bodyH);
+    ctx.lineTo(cx - sz * 0.12, baseY);
+    ctx.lineTo(cx - sz * 0.12 + legW, baseY);
+    ctx.lineTo(cx + legW / 2 - sz * 0.04, bodyTop + bodyH);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    // Sidearm hint at hip.
+    ctx.strokeStyle = '#e5e7eb';
+    ctx.lineWidth = Math.max(1, sz * 0.025);
+    ctx.beginPath();
+    ctx.moveTo(cx + bodyW / 2, bodyTop + bodyH * 0.6);
+    ctx.lineTo(cx + bodyW / 2 + sz * 0.14, bodyTop + bodyH * 0.4);
+    ctx.stroke();
+  } else if (unit.type === 'empath') {
+    // Empath — robed silhouette with faint purple glow.
+    // Outer glow halo.
+    ctx.fillStyle = 'rgba(167,139,250,0.18)';
+    ctx.beginPath(); ctx.arc(cx, baseY - sz * 0.32, sz * 0.36, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+    ctx.fillStyle = 'rgba(167,139,250,0.30)';
+    ctx.beginPath(); ctx.arc(cx, baseY - sz * 0.32, sz * 0.22, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+    // Robe — wide triangle (top narrow, bottom wide).
+    const robeTop = baseY - sz * 0.40;
+    const robeHalfBottom = sz * 0.18;
+    const robeHalfTop = sz * 0.06;
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.moveTo(cx - robeHalfTop, robeTop);
+    ctx.lineTo(cx + robeHalfTop, robeTop);
+    ctx.lineTo(cx + robeHalfBottom, baseY);
+    ctx.lineTo(cx - robeHalfBottom, baseY);
+    ctx.closePath();
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.45)'; ctx.lineWidth = Math.max(0.5, 1 / camera.zoom);
+    ctx.stroke();
+    // Dark hem trim.
+    ctx.fillStyle = colorDark;
+    ctx.fillRect(cx - robeHalfBottom, baseY - sz * 0.04, robeHalfBottom * 2, sz * 0.04);
+    // Hooded head.
+    const headR = sz * 0.10;
+    const headY = robeTop - headR + sz * 0.02;
+    ctx.beginPath(); ctx.arc(cx, headY, headR, 0, Math.PI * 2); ctx.closePath();
+    ctx.fillStyle = '#fde68a'; ctx.fill();
+    ctx.strokeStyle = 'rgba(0,0,0,0.55)'; ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, headY, headR, Math.PI, 2 * Math.PI); ctx.closePath();
+    ctx.fillStyle = colorDark; ctx.fill(); ctx.stroke();
+    // Glowing orb (the empath's gift).
+    ctx.fillStyle = '#ddd6fe';
+    ctx.beginPath(); ctx.arc(cx, baseY - sz * 0.16, sz * 0.05, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+    ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = Math.max(0.5, 0.8 / camera.zoom);
+    ctx.stroke();
   }
 
   // HP bar above unit
@@ -2226,6 +2430,10 @@ const makeWarriorBtn = document.getElementById('makeWarriorBtn');
 const makeRiderBtn = document.getElementById('makeRiderBtn');
 const makeArcherBtn = document.getElementById('makeArcherBtn');
 const makeDefenderBtn = document.getElementById('makeDefenderBtn');
+const makeMarauderBtn = document.getElementById('makeMarauderBtn');
+const makeMortarBtn = document.getElementById('makeMortarBtn');
+const makeStriderBtn = document.getElementById('makeStriderBtn');
+const makeEmpathBtn = document.getElementById('makeEmpathBtn');
 const apCloseBtn = document.getElementById('apCloseBtn');
 const passOverlay = document.getElementById('passOverlay');
 const passTitle = document.getElementById('passTitle');
@@ -2334,6 +2542,10 @@ function updateActionPicker() {
       applyTrainBtnGate(makeRiderBtn,    'rider',    empty, stars, researched);
       applyTrainBtnGate(makeArcherBtn,   'archer',   empty, stars, researched);
       applyTrainBtnGate(makeDefenderBtn, 'defender', empty, stars, researched);
+      applyTrainBtnGate(makeMarauderBtn, 'marauder', empty, stars, researched);
+      applyTrainBtnGate(makeMortarBtn,   'mortar',   empty, stars, researched);
+      applyTrainBtnGate(makeStriderBtn,  'strider',  empty, stars, researched);
+      applyTrainBtnGate(makeEmpathBtn,   'empath',   empty, stars, researched);
       const wallBtn = document.getElementById('buildWallBtn');
       if (wallBtn) {
         wallBtn.disabled = v.hasWall || stars < WALL_COST;
@@ -2457,6 +2669,26 @@ makeDefenderBtn.addEventListener('click', () => {
   if (!game.selected) return;
   const v = game.villageAt(game.selected.q, game.selected.r);
   if (v) clientTrainUnit(v, 'defender');
+});
+makeMarauderBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'marauder');
+});
+makeMortarBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'mortar');
+});
+makeStriderBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'strider');
+});
+makeEmpathBtn.addEventListener('click', () => {
+  if (!game.selected) return;
+  const v = game.villageAt(game.selected.q, game.selected.r);
+  if (v) clientTrainUnit(v, 'empath');
 });
 const buildWallBtn = document.getElementById('buildWallBtn');
 buildWallBtn.addEventListener('click', () => {
