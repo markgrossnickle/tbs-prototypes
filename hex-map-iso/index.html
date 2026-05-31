@@ -917,22 +917,40 @@ function endTurn(state) {
 }
 
 // ============================================================
-// AI OPPONENT (offline only) — greedy heuristic
+// AI OPPONENT (offline only) — priority-based heuristic
 // ------------------------------------------------------------
 // Client-side stub bot that controls P2 when ?ai=1 (or the "vs AI"
 // toggle is on). Uses the same local helpers humans use (trainUnit,
-// moveUnit, attackUnit, endTurn) so the prototype rules stay the
-// single source of truth. NOT wired into the server — server still
-// stays human-input-only.
+// moveUnit, attackUnit, buildWallLocal, buildFarmLocal, researchTech,
+// endTurn) so the prototype rules stay the single source of truth.
+// NOT wired into the server — server still stays human-input-only.
 //
-// Per-turn algorithm (deterministic, no Math.random):
-//   1. For each owned empty village: train cheapest affordable unit.
-//   2. For each owned unit (sorted by id):
-//        a. If any enemy in attack range, attack lowest-HP enemy
-//           (ties broken by closest hex distance to AI's capital).
-//        b. Else if it can move, step one hex closer to the nearest
-//           enemy capital using BFS-shortest-path.
-//   3. End turn (caller handles SFX + pass overlay skip).
+// Per-turn priorities (deterministic, no Math.random):
+//   1. ECONOMY  — build Farm on closest own-territory plains tile if
+//                 stars >= FARM_COST + 2.
+//   2. RESEARCH — at most one per turn:
+//                   opponent has Archer/Sniper → research Archery (Optics)
+//                   opponent has Defender/Mech → research Strategy (Engineering)
+//                   else if Riding not researched → research Riding (Mobility)
+//   3. WALLS    — build wall on own capital if unwalled AND stars >= WALL_COST + 4.
+//   4. TRAIN    — most expensive affordable unit we have tech for, preferring:
+//                   Defender if Strategy researched AND opponent melee approaching
+//                   Archer   if Archery researched
+//                   Rider    if Riding researched AND open ground
+//                   else Warrior.
+//   5. MOVE/ATTACK — per unit (sorted by id):
+//                   a. attack best damage trade in range
+//                   b. else if HP < 50% retreat one hex toward nearest own village
+//                   c. else step toward closest enemy capital (BFS)
+//                   d. Dash: attack again after moving if still able.
+//   6. END TURN — caller handles SFX + pass overlay skip.
+//
+// Mirrors /prototype/src/game/ai.ts. Same state in → same intent
+// sequence forever. Tunings live in one place each:
+//   FARM_BUFFER  = 2  (FARM_COST + 2)
+//   WALL_BUFFER  = 4  (WALL_COST + 4)
+//   LOW_HP_FRAC  = 0.5
+//   MELEE_NEAR   = 4  hexes from any own village = "approaching"
 // ============================================================
 
 const AI = {
@@ -1010,9 +1028,195 @@ function aiOwnCapital(state, playerId) {
   return state.map.tiles.find(t => t.hasVillage && t.ownerPlayer === playerId) || null;
 }
 
-// Step 1 of the AI turn: train cheapest affordable unit in each empty
-// owned village. Returns a list of {village, unitType} actions for the
-// caller to execute with pacing.
+// Opponent has a visible (to AI) unit of the given type?
+function aiOpponentHasUnitType(state, playerId, unitType) {
+  const oppId = 1 - playerId;
+  const vis = visibilityForPlayer(state, playerId);
+  return state.units.some(u =>
+    u.player === oppId &&
+    u.type === unitType &&
+    isVisible(vis, u.q, u.r),
+  );
+}
+
+// "Opponent melee approaching" = any visible enemy unit with range 1
+// within 4 hexes of an AI village. Triggers preference for Defenders.
+function aiOpponentMeleeApproaching(state, playerId) {
+  const vis = visibilityForPlayer(state, playerId);
+  const oppId = 1 - playerId;
+  const ownVillages = state.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === playerId);
+  for (const u of state.units) {
+    if (u.player !== oppId) continue;
+    if (UNIT_STATS[u.type].range !== 1) continue;
+    if (!isVisible(vis, u.q, u.r)) continue;
+    for (const v of ownVillages) {
+      if (hexDistance(u.q, u.r, v.q, v.r) <= 4) return true;
+    }
+  }
+  return false;
+}
+
+// Rough "open ground" check: sample tiles on the straight axial line
+// between AI capital and the closest enemy capital. If a majority of
+// samples are plains → open ground favors fast Riders.
+function aiOpenGroundToEnemyCapital(state, playerId) {
+  const own = aiOwnCapital(state, playerId);
+  const caps = aiEnemyCapitals(state, playerId);
+  if (!own || caps.length === 0) return false;
+  let target = null;
+  let best = Infinity;
+  for (const c of caps) {
+    const d = hexDistance(own.q, own.r, c.q, c.r);
+    if (d < best) { best = d; target = c; }
+  }
+  if (!target) return false;
+  const samples = Math.max(2, Math.min(6, best));
+  let plains = 0;
+  let scored = 0;
+  for (let i = 1; i <= samples; i++) {
+    const t = i / (samples + 1);
+    const q = Math.round(own.q + (target.q - own.q) * t);
+    const r = Math.round(own.r + (target.r - own.r) * t);
+    const tile = state.tileAt(q, r);
+    if (!tile) continue;
+    scored++;
+    if (tile.type === TILE.PLAINS) plains++;
+  }
+  if (scored === 0) return false;
+  return plains * 2 >= scored;
+}
+
+// All enemy units the unit could attack right now (visible, in range, d>0).
+function aiAttackableEnemies(state, unit) {
+  if (UNIT_STATS[unit.type].atk === 0) return [];
+  const vis = visibilityForPlayer(state, unit.player);
+  const range = UNIT_STATS[unit.type].range;
+  const out = [];
+  for (const u of state.units) {
+    if (u.player === unit.player) continue;
+    if (!isVisible(vis, u.q, u.r)) continue;
+    const d = hexDistance(unit.q, unit.r, u.q, u.r);
+    if (d <= range && d > 0) out.push(u);
+  }
+  return out;
+}
+
+// Predicted combat trade. Mirrors rules.ts retaliation gating verbatim.
+function aiPredictTrade(state, att, def) {
+  const defTile = state.tileAt(def.q, def.r);
+  if (!defTile) return { defenderDamage: 0, attackerDamage: 0 };
+  const bonus = tileDefenseBonus(defTile);
+  const raw = resolveCombat(att, def, bonus);
+  const dist = hexDistance(att.q, att.r, def.q, def.r);
+  const defenderCanReachAttacker = dist <= UNIT_STATS[def.type].range;
+  const attackerHasStiff = UNIT_STATS[att.type].skill === 'stiff';
+  const willKillDefender = def.hp - raw.defenderDamage <= 0;
+  const retaliates =
+    !willKillDefender &&
+    !attackerHasStiff &&
+    UNIT_STATS[def.type].atk > 0 &&
+    defenderCanReachAttacker;
+  return {
+    defenderDamage: raw.defenderDamage,
+    attackerDamage: retaliates ? raw.attackerDamage : 0,
+  };
+}
+
+// Sort by (defenderDamage - attackerDamage) descending. Tie-breaks:
+// bigger raw hit, then lowest HP, then id.
+function aiPickBestTarget(state, attacker, candidates) {
+  if (!candidates.length) return null;
+  const scored = candidates.map(t => {
+    const trade = aiPredictTrade(state, attacker, t);
+    return {
+      target: t,
+      score: trade.defenderDamage - trade.attackerDamage,
+      dmg: trade.defenderDamage,
+    };
+  });
+  scored.sort((a, b) => {
+    if (a.score !== b.score) return b.score - a.score;
+    if (a.dmg !== b.dmg) return b.dmg - a.dmg;
+    if (a.target.hp !== b.target.hp) return a.target.hp - b.target.hp;
+    return a.target.id < b.target.id ? -1 : 1;
+  });
+  return scored[0].target;
+}
+
+// Pick the empty plains tile inside own territory closest to own capital
+// (tie-break: (q,r)). Returns null if none qualify.
+function aiPickFarmTile(state, playerId) {
+  const own = aiOwnCapital(state, playerId);
+  if (!own) return null;
+  const candidates = [];
+  for (const t of state.map.tiles) {
+    if (t.type !== TILE.PLAINS) continue;
+    if (t.hasFarm || t.hasVillage) continue;
+    if (state.unitAt(t.q, t.r)) continue;
+    if (!isOwnTerritory(state, t.q, t.r, playerId)) continue;
+    candidates.push(t);
+  }
+  if (!candidates.length) return null;
+  candidates.sort((a, b) => {
+    const da = hexDistance(a.q, a.r, own.q, own.r);
+    const db = hexDistance(b.q, b.r, own.q, own.r);
+    if (da !== db) return da - db;
+    if (a.q !== b.q) return a.q - b.q;
+    return a.r - b.r;
+  });
+  return candidates[0];
+}
+
+// Pick the research target (at most one per turn). Priority:
+//   archery → if opponent has Archer trained and we don't
+//   strategy → if opponent has Defender trained and we don't
+//   riding → if we don't have it
+// Returns null if nothing applies or stars < TECH_COST.
+function aiPickResearch(state, playerId) {
+  const player = state.players[playerId];
+  if (player.stars < TECH_COST) return null;
+  const has = (t) => player.researchedTechs.includes(t);
+  if (!has('archery')  && aiOpponentHasUnitType(state, playerId, 'archer'))   return 'archery';
+  if (!has('strategy') && aiOpponentHasUnitType(state, playerId, 'defender')) return 'strategy';
+  if (!has('riding'))  return 'riding';
+  return null;
+}
+
+// Pick the unit type to train at a given village given current `stars`.
+// Most expensive affordable unit from the preference list (driven by tech).
+function aiPickTrainingUnit(state, playerId, stars) {
+  const player = state.players[playerId];
+  const has = (tech) => player.researchedTechs.includes(tech);
+  const can = (t) => {
+    const req = UNIT_TECH_REQUIREMENT[t];
+    if (req && !has(req)) return false;
+    return UNIT_STATS[t].cost <= stars;
+  };
+  const prefs = [];
+  if (has('strategy') && aiOpponentMeleeApproaching(state, playerId)) prefs.push('defender');
+  if (has('archery')) prefs.push('archer');
+  if (has('riding') && aiOpenGroundToEnemyCapital(state, playerId)) prefs.push('rider');
+  if (has('smithery')) prefs.push('marauder');
+  if (has('cavalry')) prefs.push('strider');
+  if (has('ballistics')) prefs.push('mortar');
+  if (has('psionics')) prefs.push('empath');
+  if (has('strategy') && !prefs.includes('defender')) prefs.push('defender');
+  if (has('riding') && !prefs.includes('rider')) prefs.push('rider');
+  prefs.push('warrior');
+  let best = null;
+  let bestCost = -1;
+  for (const t of prefs) {
+    if (!can(t)) continue;
+    if (UNIT_STATS[t].cost > bestCost) {
+      best = t;
+      bestCost = UNIT_STATS[t].cost;
+    }
+  }
+  return best;
+}
+
+// Plan training intents for each empty owned village, tracking remaining
+// stars across villages so we don't propose intents the engine would reject.
 function aiPlanTraining(state, playerId) {
   // Sorted by axial (q,r) so ordering is stable across runs.
   const villages = state.map.tiles
@@ -1020,19 +1224,9 @@ function aiPlanTraining(state, playerId) {
     .filter(t => !state.unitAt(t.q, t.r))
     .sort((a, b) => (a.q - b.q) || (a.r - b.r));
   const actions = [];
-  // Tech gate: AI considers only unit types whose required tech is researched.
-  // v0 heuristic is "build cheapest" — with no research the AI sticks to Warriors,
-  // which is fine for now (research strategy is deferred). Documented in spec.
-  const player = state.players[playerId];
-  const unlocked = Object.keys(UNIT_STATS).filter(t => {
-    const req = UNIT_TECH_REQUIREMENT[t];
-    return !req || player.researchedTechs.includes(req);
-  });
-  const unitTypesByCost = unlocked.sort((a, b) => UNIT_STATS[a].cost - UNIT_STATS[b].cost);
-  let stars = player.stars;
+  let stars = state.players[playerId].stars;
   for (const v of villages) {
-    // Pick the cheapest affordable — Warrior at 2★ in practice.
-    const pick = unitTypesByCost.find(t => UNIT_STATS[t].cost <= stars);
+    const pick = aiPickTrainingUnit(state, playerId, stars);
     if (!pick) break;
     actions.push({ kind: 'train', village: v, unitType: pick });
     stars -= UNIT_STATS[pick].cost;
@@ -1040,18 +1234,109 @@ function aiPlanTraining(state, playerId) {
   return actions;
 }
 
-// Step 2 plan-and-execute is interleaved (each action mutates state),
-// so we run it directly rather than returning a static plan.
-//
+// For a low-HP unit, pick a reachable tile that decreases hex distance to
+// the nearest own village. Returns null if none qualifies (or we're already
+// on a village).
+function aiPickRetreatTile(state, unit) {
+  const ownVillages = state.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === unit.player);
+  if (!ownVillages.length) return null;
+  const nearest = (q, r) => {
+    let best = Infinity;
+    for (const v of ownVillages) {
+      const d = hexDistance(q, r, v.q, v.r);
+      if (d < best) best = d;
+    }
+    return best;
+  };
+  const curDist = nearest(unit.q, unit.r);
+  if (curDist === 0) return null;
+  const reach = reachableTiles(state, unit);
+  let best = null;
+  let bestD = curDist;
+  for (const t of reach) {
+    const d = nearest(t.q, t.r);
+    if (d < bestD || (d === bestD && best &&
+        ((t.q - best.q) || (t.r - best.r)) < 0)) {
+      best = t;
+      bestD = d;
+    }
+  }
+  return best;
+}
+
+// Pick the reachable tile that minimizes BFS path distance to the nearest
+// enemy capital, strictly decreasing hex distance from current. Returns
+// null if no such tile (already as close as we can get, or no reach).
+function aiPickAdvanceTile(state, unit, enemyCaps) {
+  if (!enemyCaps.length) return null;
+  const reach = reachableTiles(state, unit);
+  if (!reach.length) return null;
+  let bestTile = null;
+  let bestPath = Infinity;
+  let bestHex = Infinity;
+  for (const t of reach) {
+    let pathBest = Infinity;
+    let hexBest = Infinity;
+    for (const cap of enemyCaps) {
+      const p = aiBfsDistance(state, t.q, t.r, cap.q, cap.r);
+      if (p < pathBest) pathBest = p;
+      const h = hexDistance(t.q, t.r, cap.q, cap.r);
+      if (h < hexBest) hexBest = h;
+    }
+    if (pathBest < bestPath ||
+        (pathBest === bestPath && hexBest < bestHex) ||
+        (pathBest === bestPath && hexBest === bestHex && bestTile &&
+          ((t.q - bestTile.q) || (t.r - bestTile.r)) < 0)) {
+      bestTile = t;
+      bestPath = pathBest;
+      bestHex = hexBest;
+    }
+  }
+  if (!bestTile) return null;
+  let curHex = Infinity;
+  for (const cap of enemyCaps) {
+    const h = hexDistance(unit.q, unit.r, cap.q, cap.r);
+    if (h < curHex) curHex = h;
+  }
+  if (bestHex >= curHex) return null;
+  return bestTile;
+}
+
 // Run the full AI turn for the active player. Mutates state via the
-// existing local helpers. Yields control between actions so the UI
-// can animate / play SFX. Caller is responsible for calling endTurn
-// + showing the pass overlay afterward.
+// existing local helpers; yields control between actions so the UI can
+// animate / play SFX. Caller is responsible for calling endTurn afterward.
 async function aiPlayTurn(state, onAction) {
   if (state.currentPlayer !== AI.player) return;
   const playerId = AI.player;
 
-  // ---- 1. Training ----
+  // ---- 1. ECONOMY: Farm ----
+  if (state.players[playerId].stars >= FARM_COST + 2) {
+    const farmTile = aiPickFarmTile(state, playerId);
+    if (farmTile && buildFarmLocal(state, farmTile)) {
+      playSfx('build');
+      if (onAction) onAction({ kind: 'farm' });
+      await aiSleep(AI.actionDelayMs);
+    }
+  }
+
+  // ---- 2. RESEARCH ----
+  const tech = aiPickResearch(state, playerId);
+  if (tech && researchTech(state, tech)) {
+    if (onAction) onAction({ kind: 'research', tech });
+    await aiSleep(AI.actionDelayMs);
+  }
+
+  // ---- 3. WALLS ----
+  if (state.players[playerId].stars >= WALL_COST + 4) {
+    const cap = aiOwnCapital(state, playerId);
+    if (cap && !cap.hasWall && buildWallLocal(state, cap)) {
+      playSfx('build');
+      if (onAction) onAction({ kind: 'wall' });
+      await aiSleep(AI.actionDelayMs);
+    }
+  }
+
+  // ---- 4. TRAIN ----
   const trainActions = aiPlanTraining(state, playerId);
   for (const a of trainActions) {
     if (trainUnit(state, a.village, a.unitType)) {
@@ -1061,99 +1346,67 @@ async function aiPlayTurn(state, onAction) {
     }
   }
 
-  // ---- 2. Unit actions ----
+  // ---- 5. MOVE / ATTACK ----
   // Stable order by unit id. Snapshot ids — units may die mid-turn.
   const ownedUnitIds = state.units
     .filter(u => u.player === playerId)
     .map(u => u.id)
     .sort();
 
-  const ownCap = aiOwnCapital(state, playerId);
   const enemyCaps = aiEnemyCapitals(state, playerId);
 
   for (const uid of ownedUnitIds) {
-    const unit = state.units.find(u => u.id === uid);
-    if (!unit) continue; // killed earlier this turn (shouldn't happen but defensive)
+    let unit = state.units.find(u => u.id === uid);
+    if (!unit) continue;
 
-    // 2a. Attack if any enemy in range.
+    // 5a. Attack — best damage trade.
     if (unit.canAttack) {
-      const targets = attackableTiles(state, unit)
-        .map(t => state.unitAt(t.q, t.r))
-        .filter(Boolean);
-      if (targets.length) {
-        targets.sort((a, b) => {
-          if (a.hp !== b.hp) return a.hp - b.hp;
-          if (ownCap) {
-            const da = hexDistance(a.q, a.r, ownCap.q, ownCap.r);
-            const db = hexDistance(b.q, b.r, ownCap.q, ownCap.r);
-            if (da !== db) return da - db;
-          }
-          return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-        });
-        const target = targets[0];
+      const targets = aiAttackableEnemies(state, unit);
+      const target = aiPickBestTarget(state, unit, targets);
+      if (target) {
         const events = attackUnit(state, unit, target);
         if (events && events.length) {
           playSfx('combat');
           if (onAction) onAction({ kind: 'attack', events });
           await aiSleep(AI.actionDelayMs);
         }
-        continue; // attack consumes the unit's actions
+        continue;
       }
     }
 
-    // 2b. Move toward closest enemy capital.
+    // 5b. Retreat low-HP unit toward nearest own village.
+    unit = state.units.find(u => u.id === uid);
+    if (!unit) continue;
+    const maxHp = UNIT_STATS[unit.type].hp;
+    if (unit.canMove && unit.hp * 2 < maxHp) {
+      const retreat = aiPickRetreatTile(state, unit);
+      if (retreat) {
+        if (moveUnit(state, unit, retreat.q, retreat.r)) {
+          if (onAction) onAction({ kind: 'move' });
+          await aiSleep(AI.actionDelayMs);
+        }
+        continue;
+      }
+    }
+
+    // 5c. Advance toward closest enemy capital.
+    unit = state.units.find(u => u.id === uid);
+    if (!unit) continue;
     if (unit.canMove && enemyCaps.length) {
-      const reach = reachableTiles(state, unit);
-      if (reach.length) {
-        // Score each reachable tile by min BFS distance to any enemy capital.
-        // Tie-break: hex distance to enemy capital (a "as-the-crow-flies" fallback),
-        // then by (q,r) for determinism.
-        let bestTile = null;
-        let bestPath = Infinity;
-        let bestHex = Infinity;
-        for (const t of reach) {
-          let pathBest = Infinity;
-          let hexBest = Infinity;
-          for (const cap of enemyCaps) {
-            const p = aiBfsDistance(state, t.q, t.r, cap.q, cap.r);
-            if (p < pathBest) pathBest = p;
-            const h = hexDistance(t.q, t.r, cap.q, cap.r);
-            if (h < hexBest) hexBest = h;
-          }
-          if (pathBest < bestPath ||
-              (pathBest === bestPath && hexBest < bestHex) ||
-              (pathBest === bestPath && hexBest === bestHex && bestTile &&
-                ((t.q - bestTile.q) || (t.r - bestTile.r)) < 0)) {
-            bestTile = t;
-            bestPath = pathBest;
-            bestHex = hexBest;
-          }
-        }
-        // Also include current position as a baseline — only move if it
-        // strictly decreases hex distance to closest enemy capital.
-        let curHex = Infinity;
-        for (const cap of enemyCaps) {
-          const h = hexDistance(unit.q, unit.r, cap.q, cap.r);
-          if (h < curHex) curHex = h;
-        }
-        if (bestTile && bestHex < curHex) {
-          if (moveUnit(state, unit, bestTile.q, bestTile.r)) {
-            if (onAction) onAction({ kind: 'move' });
-            await aiSleep(AI.actionDelayMs);
-            // Riders may dash → can still attack after moving. Check again.
-            if (unit.canAttack) {
-              const targets2 = attackableTiles(state, unit)
-                .map(t => state.unitAt(t.q, t.r))
-                .filter(Boolean);
-              if (targets2.length) {
-                targets2.sort((a, b) => (a.hp - b.hp) || (a.id < b.id ? -1 : 1));
-                const events = attackUnit(state, unit, targets2[0]);
-                if (events && events.length) {
-                  playSfx('combat');
-                  if (onAction) onAction({ kind: 'attack', events });
-                  await aiSleep(AI.actionDelayMs);
-                }
-              }
+      const dest = aiPickAdvanceTile(state, unit, enemyCaps);
+      if (dest && moveUnit(state, unit, dest.q, dest.r)) {
+        if (onAction) onAction({ kind: 'move' });
+        await aiSleep(AI.actionDelayMs);
+        // 5d. Dash → attack after move if still able.
+        if (unit.canAttack) {
+          const targets2 = aiAttackableEnemies(state, unit);
+          const t2 = aiPickBestTarget(state, unit, targets2);
+          if (t2) {
+            const events = attackUnit(state, unit, t2);
+            if (events && events.length) {
+              playSfx('combat');
+              if (onAction) onAction({ kind: 'attack', events });
+              await aiSleep(AI.actionDelayMs);
             }
           }
         }
