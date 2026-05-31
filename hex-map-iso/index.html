@@ -1474,9 +1474,29 @@ async function clientStartNewGame(seed) {
 // ============================================================
 const camera = {
   x: 0, y: 0, zoom: 1,
-  reset() { this.zoom = 1; this.recenter(); },
+  reset() { this.zoom = computeFitZoom(); this.recenter(); },
   recenter() { this.x = canvas.width / dpr / 2; this.y = canvas.height / dpr / 2; }
 };
+
+// Pick an initial zoom so the entire board fits inside the viewport with
+// a small margin. On a phone in portrait the board can be ~720 world-px
+// wide at zoom 1 — larger than the 390px iPhone viewport, which would
+// crop the far-side capital. Recomputed on every reset / resize.
+function computeFitZoom() {
+  if (!canvas || !canvas.width) return 1;
+  const viewW = canvas.width / dpr;
+  const viewH = canvas.height / dpr;
+  // Board world bounds at zoom 1:
+  //   horizontal radius:  HEX_SIZE * 1.5 * BOARD_RADIUS + HEX_SIZE
+  //   vertical radius:    HEX_SIZE * SQRT3 * BOARD_RADIUS + HEX_SIZE
+  // (Y is also squashed by ISO_Y_SCALE in screen space.)
+  const boardW = 2 * (HEX_SIZE * 1.5 * BOARD_RADIUS + HEX_SIZE);
+  const boardH = 2 * (HEX_SIZE * SQRT3 * BOARD_RADIUS + HEX_SIZE) * ISO_Y_SCALE;
+  // Leave 8% margin top/bottom (for top bar + end-turn button) and 4% on sides.
+  const fitX = (viewW * 0.92) / boardW;
+  const fitY = (viewH * 0.74) / boardH; // tighter vertical margin for UI chrome
+  return Math.min(1, fitX, fitY);
+}
 
 function worldToScreen(wx, wy) {
   return { x: camera.x + wx * camera.zoom, y: camera.y + wy * camera.zoom * ISO_Y_SCALE };
