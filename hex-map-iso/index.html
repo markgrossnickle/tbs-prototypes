@@ -899,7 +899,7 @@ function aiSleep(ms) {
 // Treats own units as walls; the goal hex itself is allowed even if
 // occupied (so we can measure distance to enemy capital with enemy on it).
 // Used only for movement target selection.
-function aiBfsDistance(state, sq, sr, gq, gr, playerId) {
+function aiBfsDistance(state, sq, sr, gq, gr) {
   if (sq === gq && sr === gr) return 0;
   const visited = new Set([`${sq},${sr}`]);
   const queue = [{ q: sq, r: sr, d: 0 }];
@@ -1042,7 +1042,7 @@ async function aiPlayTurn(state, onAction) {
           let pathBest = Infinity;
           let hexBest = Infinity;
           for (const cap of enemyCaps) {
-            const p = aiBfsDistance(state, t.q, t.r, cap.q, cap.r, playerId);
+            const p = aiBfsDistance(state, t.q, t.r, cap.q, cap.r);
             if (p < pathBest) pathBest = p;
             const h = hexDistance(t.q, t.r, cap.q, cap.r);
             if (h < hexBest) hexBest = h;
@@ -1410,18 +1410,29 @@ async function clientBuildFarm(tile) {
   }
 }
 
+// Snapshot village ownership before an end-turn so we can detect captures
+// after the resolver runs. Used by 3 call sites (offline endTurn, online,
+// AI endTurn) to fire the capture jingle.
+function snapshotVillageOwners(state) {
+  return state.map.tiles
+    .filter(t => t.hasVillage)
+    .map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
+}
+function ringCaptureSfxIfChanged(state, before) {
+  const captured = state.map.tiles.some(t => {
+    if (!t.hasVillage) return false;
+    const prev = before.find(b => b.q === t.q && b.r === t.r);
+    return prev && prev.owner !== t.ownerPlayer;
+  });
+  if (captured) setTimeout(() => playSfx('capture'), 250);
+}
+
 async function clientEndTurn() {
   if (!NET.enabled) {
-    const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
+    const before = snapshotVillageOwners(game);
     endTurn(game);
     playSfx('endTurn');
-    // Detect any village captured during this end-turn → play capture jingle
-    const captured = game.map.tiles.some(t => {
-      if (!t.hasVillage) return false;
-      const prev = before.find(b => b.q === t.q && b.r === t.r);
-      return prev && prev.owner !== t.ownerPlayer;
-    });
-    if (captured) setTimeout(() => playSfx('capture'), 250);
+    ringCaptureSfxIfChanged(game, before);
     return;
   }
   if (!isMyTurn() || NET.inFlight) return;
@@ -2345,10 +2356,9 @@ function renderTechPanel() {
       btn.textContent = `Research (${TECH_COST}★)`;
       btn.disabled = !affordable;
       btn.addEventListener('click', () => {
+        // updateAll() in offline mode (and netRefreshAndRender() in online)
+        // both re-render the tech panel via the visibility-check helper.
         clientResearch(id);
-        // The click triggers an async network round-trip in online mode;
-        // re-render after the next microtask so updated state shows.
-        setTimeout(() => { if (techPanel.style.display === 'block') renderTechPanel(); }, 0);
       });
       row.appendChild(btn);
     }
@@ -2424,15 +2434,10 @@ endTurnBtn.addEventListener('click', () => {
     return;
   }
   // Local end turn.
-  const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
+  const before = snapshotVillageOwners(game);
   endTurn(game);
   playSfx('endTurn');
-  const captured = game.map.tiles.some(t => {
-    if (!t.hasVillage) return false;
-    const prev = before.find(b => b.q === t.q && b.r === t.r);
-    return prev && prev.owner !== t.ownerPlayer;
-  });
-  if (captured) setTimeout(() => playSfx('capture'), 250);
+  ringCaptureSfxIfChanged(game, before);
   if (game.phase === 'won') {
     showWin();
     return;
@@ -2468,15 +2473,10 @@ async function runAiTurn() {
       updateAll();
     });
     // AI ends its turn.
-    const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
+    const before = snapshotVillageOwners(game);
     endTurn(game);
     playSfx('endTurn');
-    const captured = game.map.tiles.some(t => {
-      if (!t.hasVillage) return false;
-      const prev = before.find(b => b.q === t.q && b.r === t.r);
-      return prev && prev.owner !== t.ownerPlayer;
-    });
-    if (captured) setTimeout(() => playSfx('capture'), 250);
+    ringCaptureSfxIfChanged(game, before);
     if (game.phase === 'won') {
       updateAll();
       showWin();
