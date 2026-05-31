@@ -199,6 +199,7 @@
     <button class="pill" id="techBtn" title="Tech tree — research to unlock units">Tech</button>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
     <button class="pill" id="newGameBtn">New</button>
+    <button class="pill" id="musicBtn" title="Music">♪ off</button>
     <button class="pill" id="aiToggleBtn" title="Toggle AI opponent (P2)">vs AI: off</button>
     <div class="pill muted" id="modePill" title="Network mode">offline</div>
   </div>
@@ -377,6 +378,28 @@ function playSfx(key) {
   a.volume = src.volume;
   a.play().catch(() => {});
 }
+
+// Ambient music — single looping <audio>, opt-in.
+const MUSIC = { audio: null, on: false };
+function ensureMusic() {
+  if (MUSIC.audio) return MUSIC.audio;
+  const a = new Audio('sfx/tbs-ambient.mp3');
+  a.preload = 'auto';
+  a.loop = true;
+  a.volume = 0.18;
+  MUSIC.audio = a;
+  return a;
+}
+function setMusic(on) {
+  MUSIC.on = on;
+  const a = ensureMusic();
+  if (on) a.play().catch(() => { MUSIC.on = false; });
+  else { a.pause(); a.currentTime = 0; }
+  try { localStorage.setItem('tbs.music', on ? '1' : '0'); } catch {}
+  const btn = document.getElementById('musicBtn');
+  if (btn) btn.textContent = on ? '♪ on' : '♪ off';
+}
+function toggleMusic() { setMusic(!MUSIC.on); }
 
 const TILE = {
   WATER:    { id: 'water',    top: '#2563eb', side: '#1e3a8a', label: 'water',    passable: false, defenseBonus: 1.0 },
@@ -2600,6 +2623,16 @@ newGameBtn.addEventListener('click', () => {
   startNewGame();
 });
 seedInput.addEventListener('change', startNewGame);
+
+// Music toggle — also restore on boot from localStorage (off by default).
+const musicBtn = document.getElementById('musicBtn');
+musicBtn.addEventListener('click', () => { unlockSfxOnce(); toggleMusic(); });
+try {
+  if (localStorage.getItem('tbs.music') === '1') {
+    // Don't actually play until first user gesture (iOS); the click handler will.
+    musicBtn.textContent = '♪ on';
+  }
+} catch {}
 
 // "vs AI" toggle — opt-in client-side AI for P2. Persists via ?ai=1 so a
 // page refresh keeps the mode. Toggling does NOT auto-start a new game;
