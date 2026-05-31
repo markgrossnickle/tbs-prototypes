@@ -171,6 +171,7 @@
     <div class="pill" id="turnPill">P1 · 5★ · Turn 1</div>
     <label class="pill"><span class="muted">seed</span>&nbsp;<input id="seedInput" type="text" inputmode="numeric" pattern="[0-9]*" /></label>
     <button class="pill" id="newGameBtn">New</button>
+    <button class="pill" id="aiToggleBtn" title="Toggle AI opponent (P2)">vs AI: off</button>
     <div class="pill muted" id="modePill" title="Network mode">offline</div>
   </div>
 
@@ -545,6 +546,13 @@ function generateMap(seed, radius) {
       if (d > best) { best = d; p1V = pool[i]; p2V = pool[j]; }
     }
   }
+  // In "vs AI" mode, give the human (P1) the more-central spawn so the
+  // bot doesn't immediately end up in a positional advantage that
+  // compensates for its dumb heuristic. Centrality = lower max(|q|,|r|,|s|).
+  if (AI.enabled && p1V && p2V) {
+    const cent = v => Math.max(Math.abs(v.q), Math.abs(v.r), Math.abs(-v.q - v.r));
+    if (cent(p2V) < cent(p1V)) { const t = p1V; p1V = p2V; p2V = t; }
+  }
   // Capitals start walled (GDD §2.3 City Wall, ×4 def). Other villages unwalled.
   if (p1V) { p1V.ownerPlayer = 0; p1V.isCapital = true; p1V.hasWall = true; }
   if (p2V) { p2V.ownerPlayer = 1; p2V.isCapital = true; p2V.hasWall = true; }
@@ -723,6 +731,244 @@ function endTurn(state) {
   if (state.currentPlayer === 0) state.turn += 1;
   state.phase = 'pass';
   state.selected = null;
+}
+
+// ============================================================
+// AI OPPONENT (offline only) — greedy heuristic
+// ------------------------------------------------------------
+// Client-side stub bot that controls P2 when ?ai=1 (or the "vs AI"
+// toggle is on). Uses the same local helpers humans use (trainUnit,
+// moveUnit, attackUnit, endTurn) so the prototype rules stay the
+// single source of truth. NOT wired into the server — server still
+// stays human-input-only.
+//
+// Per-turn algorithm (deterministic, no Math.random):
+//   1. For each owned empty village: train cheapest affordable unit.
+//   2. For each owned unit (sorted by id):
+//        a. If any enemy in attack range, attack lowest-HP enemy
+//           (ties broken by closest hex distance to AI's capital).
+//        b. Else if it can move, step one hex closer to the nearest
+//           enemy capital using BFS-shortest-path.
+//   3. End turn (caller handles SFX + pass overlay skip).
+// ============================================================
+
+const AI = {
+  enabled: false,
+  player: 1,           // AI is always P2 in this prototype
+  acting: false,       // re-entrancy guard while a turn is in progress
+  actionDelayMs: 400,  // pause between AI actions so the human sees them
+};
+
+function readAiConfigFromUrl() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const ai = params.get('ai');
+    return ai === '1' || ai === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function writeAiFlagToUrl(on) {
+  try {
+    const u = new URL(window.location.href);
+    if (on) u.searchParams.set('ai', '1');
+    else u.searchParams.delete('ai');
+    window.history.replaceState({}, '', u.toString());
+  } catch { /* noop */ }
+}
+
+// Sleep helper for AI pacing. Resolves after ms (or immediately if ms<=0).
+function aiSleep(ms) {
+  if (ms <= 0) return Promise.resolve();
+  return new Promise(res => setTimeout(res, ms));
+}
+
+// BFS shortest path length from (sq,sr) to (gq,gr), counting tiles
+// (start excluded, goal included). Returns Infinity if unreachable.
+// Treats own units as walls; the goal hex itself is allowed even if
+// occupied (so we can measure distance to enemy capital with enemy on it).
+// Used only for movement target selection.
+function aiBfsDistance(state, sq, sr, gq, gr, playerId) {
+  if (sq === gq && sr === gr) return 0;
+  const visited = new Set([`${sq},${sr}`]);
+  const queue = [{ q: sq, r: sr, d: 0 }];
+  while (queue.length) {
+    const { q, r, d } = queue.shift();
+    for (const { q: nq, r: nr } of neighborsOf(q, r)) {
+      const k = `${nq},${nr}`;
+      if (visited.has(k)) continue;
+      const tile = state.tileAt(nq, nr);
+      if (!tile) continue;
+      if (nq === gq && nr === gr) return d + 1;
+      if (!tile.type.passable) continue;
+      // Treat occupied hexes as blocked for pathing.
+      if (state.unitAt(nq, nr)) continue;
+      visited.add(k);
+      queue.push({ q: nq, r: nr, d: d + 1 });
+    }
+  }
+  return Infinity;
+}
+
+// Find the enemy capital(s) for the AI player. Falls back to any
+// enemy-owned village if no capital remains (edge case after capture).
+function aiEnemyCapitals(state, playerId) {
+  const oppId = 1 - playerId;
+  const capitals = state.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === oppId && t.isCapital);
+  if (capitals.length) return capitals;
+  return state.map.tiles.filter(t => t.hasVillage && t.ownerPlayer === oppId);
+}
+
+// Find own capital for tie-break ordering. Falls back to any owned village.
+function aiOwnCapital(state, playerId) {
+  const cap = state.map.tiles.find(t => t.hasVillage && t.ownerPlayer === playerId && t.isCapital);
+  if (cap) return cap;
+  return state.map.tiles.find(t => t.hasVillage && t.ownerPlayer === playerId) || null;
+}
+
+// Step 1 of the AI turn: train cheapest affordable unit in each empty
+// owned village. Returns a list of {village, unitType} actions for the
+// caller to execute with pacing.
+function aiPlanTraining(state, playerId) {
+  // Sorted by axial (q,r) so ordering is stable across runs.
+  const villages = state.map.tiles
+    .filter(t => t.hasVillage && t.ownerPlayer === playerId)
+    .filter(t => !state.unitAt(t.q, t.r))
+    .sort((a, b) => (a.q - b.q) || (a.r - b.r));
+  const actions = [];
+  const unitTypesByCost = Object.keys(UNIT_STATS).sort((a, b) => UNIT_STATS[a].cost - UNIT_STATS[b].cost);
+  let stars = state.players[playerId].stars;
+  for (const v of villages) {
+    // Pick the cheapest affordable — Warrior at 2★ in practice.
+    const pick = unitTypesByCost.find(t => UNIT_STATS[t].cost <= stars);
+    if (!pick) break;
+    actions.push({ kind: 'train', village: v, unitType: pick });
+    stars -= UNIT_STATS[pick].cost;
+  }
+  return actions;
+}
+
+// Step 2 plan-and-execute is interleaved (each action mutates state),
+// so we run it directly rather than returning a static plan.
+//
+// Run the full AI turn for the active player. Mutates state via the
+// existing local helpers. Yields control between actions so the UI
+// can animate / play SFX. Caller is responsible for calling endTurn
+// + showing the pass overlay afterward.
+async function aiPlayTurn(state, onAction) {
+  if (state.currentPlayer !== AI.player) return;
+  const playerId = AI.player;
+
+  // ---- 1. Training ----
+  const trainActions = aiPlanTraining(state, playerId);
+  for (const a of trainActions) {
+    if (trainUnit(state, a.village, a.unitType)) {
+      playSfx('train');
+      if (onAction) onAction({ kind: 'train', unitType: a.unitType });
+      await aiSleep(AI.actionDelayMs);
+    }
+  }
+
+  // ---- 2. Unit actions ----
+  // Stable order by unit id. Snapshot ids — units may die mid-turn.
+  const ownedUnitIds = state.units
+    .filter(u => u.player === playerId)
+    .map(u => u.id)
+    .sort();
+
+  const ownCap = aiOwnCapital(state, playerId);
+  const enemyCaps = aiEnemyCapitals(state, playerId);
+
+  for (const uid of ownedUnitIds) {
+    const unit = state.units.find(u => u.id === uid);
+    if (!unit) continue; // killed earlier this turn (shouldn't happen but defensive)
+
+    // 2a. Attack if any enemy in range.
+    if (unit.canAttack) {
+      const targets = attackableTiles(state, unit)
+        .map(t => state.unitAt(t.q, t.r))
+        .filter(Boolean);
+      if (targets.length) {
+        targets.sort((a, b) => {
+          if (a.hp !== b.hp) return a.hp - b.hp;
+          if (ownCap) {
+            const da = hexDistance(a.q, a.r, ownCap.q, ownCap.r);
+            const db = hexDistance(b.q, b.r, ownCap.q, ownCap.r);
+            if (da !== db) return da - db;
+          }
+          return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+        });
+        const target = targets[0];
+        const events = attackUnit(state, unit, target);
+        if (events && events.length) {
+          playSfx('combat');
+          if (onAction) onAction({ kind: 'attack', events });
+          await aiSleep(AI.actionDelayMs);
+        }
+        continue; // attack consumes the unit's actions
+      }
+    }
+
+    // 2b. Move toward closest enemy capital.
+    if (unit.canMove && enemyCaps.length) {
+      const reach = reachableTiles(state, unit);
+      if (reach.length) {
+        // Score each reachable tile by min BFS distance to any enemy capital.
+        // Tie-break: hex distance to enemy capital (a "as-the-crow-flies" fallback),
+        // then by (q,r) for determinism.
+        let bestTile = null;
+        let bestPath = Infinity;
+        let bestHex = Infinity;
+        for (const t of reach) {
+          let pathBest = Infinity;
+          let hexBest = Infinity;
+          for (const cap of enemyCaps) {
+            const p = aiBfsDistance(state, t.q, t.r, cap.q, cap.r, playerId);
+            if (p < pathBest) pathBest = p;
+            const h = hexDistance(t.q, t.r, cap.q, cap.r);
+            if (h < hexBest) hexBest = h;
+          }
+          if (pathBest < bestPath ||
+              (pathBest === bestPath && hexBest < bestHex) ||
+              (pathBest === bestPath && hexBest === bestHex && bestTile &&
+                ((t.q - bestTile.q) || (t.r - bestTile.r)) < 0)) {
+            bestTile = t;
+            bestPath = pathBest;
+            bestHex = hexBest;
+          }
+        }
+        // Also include current position as a baseline — only move if it
+        // strictly decreases hex distance to closest enemy capital.
+        let curHex = Infinity;
+        for (const cap of enemyCaps) {
+          const h = hexDistance(unit.q, unit.r, cap.q, cap.r);
+          if (h < curHex) curHex = h;
+        }
+        if (bestTile && bestHex < curHex) {
+          if (moveUnit(state, unit, bestTile.q, bestTile.r)) {
+            if (onAction) onAction({ kind: 'move' });
+            await aiSleep(AI.actionDelayMs);
+            // Riders may dash → can still attack after moving. Check again.
+            if (unit.canAttack) {
+              const targets2 = attackableTiles(state, unit)
+                .map(t => state.unitAt(t.q, t.r))
+                .filter(Boolean);
+              if (targets2.length) {
+                targets2.sort((a, b) => (a.hp - b.hp) || (a.id < b.id ? -1 : 1));
+                const events = attackUnit(state, unit, targets2[0]);
+                if (events && events.length) {
+                  playSfx('combat');
+                  if (onAction) onAction({ kind: 'attack', events });
+                  await aiSleep(AI.actionDelayMs);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 
 // ============================================================
@@ -1819,13 +2065,73 @@ endTurnBtn.addEventListener('click', () => {
     clientEndTurn();
     return;
   }
+  // Local end turn.
+  const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
   endTurn(game);
+  playSfx('endTurn');
+  const captured = game.map.tiles.some(t => {
+    if (!t.hasVillage) return false;
+    const prev = before.find(b => b.q === t.q && b.r === t.r);
+    return prev && prev.owner !== t.ownerPlayer;
+  });
+  if (captured) setTimeout(() => playSfx('capture'), 250);
   if (game.phase === 'won') {
     showWin();
     return;
   }
+  // AI-mode: if the next player is the AI, skip the pass overlay and
+  // run the bot turn (which itself ends turn & either shows pass or win).
+  if (AI.enabled && game.currentPlayer === AI.player) {
+    runAiTurn();
+    return;
+  }
   showPassScreen();
 });
+
+// Run the AI's turn end-to-end: startTurn → aiPlayTurn → endTurn → either
+// show pass overlay (back to human) or show win. Re-entrancy guarded.
+async function runAiTurn() {
+  if (AI.acting) return;
+  AI.acting = true;
+  try {
+    // The phase is currently 'pass' from the prior endTurn() call. Flip
+    // back to 'play' and tick startTurn so the bot's units get income +
+    // canMove/canAttack flags. Render so the player sees the AI's stars.
+    game.phase = 'play';
+    startTurn(game);
+    updateAll();
+    // Brief beat so the human can read "P2 · X★ · Turn N" before the
+    // bot starts moving.
+    await aiSleep(AI.actionDelayMs);
+    await aiPlayTurn(game, ev => {
+      if (ev && ev.kind === 'attack' && ev.events && ev.events[0]) {
+        showCombatToast(ev.events[0]);
+      }
+      updateAll();
+    });
+    // AI ends its turn.
+    const before = game.map.tiles.filter(t => t.hasVillage).map(t => ({ q: t.q, r: t.r, owner: t.ownerPlayer }));
+    endTurn(game);
+    playSfx('endTurn');
+    const captured = game.map.tiles.some(t => {
+      if (!t.hasVillage) return false;
+      const prev = before.find(b => b.q === t.q && b.r === t.r);
+      return prev && prev.owner !== t.ownerPlayer;
+    });
+    if (captured) setTimeout(() => playSfx('capture'), 250);
+    if (game.phase === 'won') {
+      updateAll();
+      showWin();
+      return;
+    }
+    // Back to human — show pass overlay so they tap to start their turn.
+    // (Could skip too, but pass screen gives a nice visual breath.)
+    updateAll();
+    showPassScreen();
+  } finally {
+    AI.acting = false;
+  }
+}
 
 function showCombatToast(ev) {
   const a = UNIT_STATS[ev.attackerType].label;
@@ -1906,6 +2212,33 @@ newGameBtn.addEventListener('click', () => {
 });
 seedInput.addEventListener('change', startNewGame);
 
+// "vs AI" toggle — opt-in client-side AI for P2. Persists via ?ai=1 so a
+// page refresh keeps the mode. Toggling does NOT auto-start a new game;
+// the player chooses when to re-roll the map. This matches the "New" button
+// flow where stars/units carry forward only if the player wants them to.
+const aiToggleBtn = document.getElementById('aiToggleBtn');
+function refreshAiToggleLabel() {
+  if (!aiToggleBtn) return;
+  aiToggleBtn.textContent = AI.enabled ? 'vs AI: on' : 'vs AI: off';
+  aiToggleBtn.style.background = AI.enabled ? 'var(--p2)' : '';
+  aiToggleBtn.style.color = AI.enabled ? 'white' : '';
+  aiToggleBtn.style.borderColor = AI.enabled ? 'transparent' : '';
+}
+if (aiToggleBtn) {
+  aiToggleBtn.addEventListener('click', () => {
+    AI.enabled = !AI.enabled;
+    writeAiFlagToUrl(AI.enabled);
+    refreshAiToggleLabel();
+    // Re-roll so the map gen can re-pick capitals with the new mode in mind.
+    startNewGame();
+    // If we just turned AI on and the next-to-act is the bot (shouldn't be
+    // at turn 1 since P1 starts), kick it off. Defensive.
+    if (AI.enabled && game.currentPlayer === AI.player && game.phase === 'play') {
+      runAiTurn();
+    }
+  });
+}
+
 // ============================================================
 // BOOT
 // ============================================================
@@ -1915,6 +2248,17 @@ camera.reset();
 seedInput.value = '1';
 
 (async function boot() {
+  // Honor ?ai=1 — must be read BEFORE the initial newGame() so map gen
+  // can give P1 the more-central spawn. The top-of-file `let game =
+  // newGame(1)` line already ran, so re-roll once we know AI is on.
+  AI.enabled = readAiConfigFromUrl();
+  refreshAiToggleLabel();
+  if (AI.enabled) {
+    // Re-run map gen with AI flag enabled so capital placement is correct.
+    game = newGame(parseInt(seedInput.value, 10) || 1);
+    startTurn(game);
+  }
+
   const cfg = readNetConfigFromUrl();
   if (cfg.enabled) {
     NET.enabled = true;
