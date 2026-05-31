@@ -363,6 +363,8 @@ function attackableTiles(state, unit) {
 }
 
 function tileDefenseBonus(tile) {
+  // GDD §2.7: 4.0 walled city, 1.5 unwalled city / forest / mountain, 1.0 plains.
+  if (tile.hasVillage && tile.hasWall) return 4.0;
   if (tile.hasVillage) return 1.5;
   return tile.type.defenseBonus;
 }
@@ -463,7 +465,7 @@ function generateMap(seed, radius) {
     const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
-    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false };
+    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false, hasWall: false };
   });
 
   // Villages on plains
@@ -495,8 +497,9 @@ function generateMap(seed, radius) {
       if (d > best) { best = d; p1V = pool[i]; p2V = pool[j]; }
     }
   }
-  if (p1V) { p1V.ownerPlayer = 0; p1V.isCapital = true; }
-  if (p2V) { p2V.ownerPlayer = 1; p2V.isCapital = true; }
+  // Capitals start walled (GDD §2.3 City Wall, ×4 def). Other villages unwalled.
+  if (p1V) { p1V.ownerPlayer = 0; p1V.isCapital = true; p1V.hasWall = true; }
+  if (p2V) { p2V.ownerPlayer = 1; p2V.isCapital = true; p2V.hasWall = true; }
 
   return { radius, tiles, seed };
 }
@@ -783,6 +786,7 @@ function adoptServerView(view, header) {
       hasVillage: !!t.hasVillage,
       ownerPlayer: t.ownerPlayer,
       isCapital: !!t.isCapital,
+      hasWall: !!t.hasWall,
     };
   });
   const state = {
@@ -1060,7 +1064,60 @@ function drawTile(tile) {
   else if (type === TILE.MOUNTAIN) drawMountain(topCenter.x, topCenter.y, sz, szY);
   else if (type === TILE.WATER) drawWaterShine(topCenter.x, topCenter.y, sz, szY);
 
-  if (tile.hasVillage) drawVillage(topCenter.x, topCenter.y, sz, szY, tile.ownerPlayer);
+  if (tile.hasVillage) {
+    if (tile.hasWall) drawWalls(topCorners, sz, depth);
+    drawVillage(topCenter.x, topCenter.y, sz, szY, tile.ownerPlayer);
+  }
+}
+
+function drawWalls(topCorners, sz, depth) {
+  // Stone parapet ringing the village tile. A short, blocky band drawn
+  // around the 6 hex edges with crenellations on the front-facing corners.
+  // Walled tiles get ×4 defense bonus (GDD §2.7) — make them look the part.
+  const wallH = Math.max(8, depth * 0.85);
+  const wallTopColor = '#9ca3af';
+  const wallSideColor = '#6b7280';
+  const wallEdge = 'rgba(0,0,0,0.55)';
+
+  // Inset corners slightly so the walls sit inside the hex rim (looks like
+  // a curtain wall, not a re-paint of the hex edge).
+  const cx = (topCorners[0].x + topCorners[3].x) / 2;
+  const cy = (topCorners[0].y + topCorners[3].y) / 2;
+  const inset = 0.92;
+  const innerCorners = topCorners.map(c => ({
+    x: cx + (c.x - cx) * inset,
+    y: cy + (c.y - cy) * inset,
+  }));
+
+  // Wall band: 6 quads, each from an inner corner to the next, raised by wallH.
+  for (let i = 0; i < 6; i++) {
+    const a = innerCorners[i];
+    const b = innerCorners[(i + 1) % 6];
+    const isBack = i === 4 || i === 5 || i === 0; // back-facing half — fully visible
+    // Side face
+    ctx.fillStyle = wallSideColor;
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y);
+    ctx.lineTo(b.x, b.y);
+    ctx.lineTo(b.x, b.y - wallH);
+    ctx.lineTo(a.x, a.y - wallH);
+    ctx.closePath();
+    ctx.fill();
+    if (isBack) {
+      ctx.fillStyle = 'rgba(0,0,0,0.18)';
+      ctx.fill();
+    }
+    ctx.strokeStyle = wallEdge;
+    ctx.lineWidth = Math.max(0.5, 0.7 / camera.zoom);
+    ctx.stroke();
+    // Top (parapet)
+    ctx.beginPath();
+    ctx.moveTo(a.x, a.y - wallH);
+    ctx.lineTo(b.x, b.y - wallH);
+    ctx.lineWidth = Math.max(1, 1.6 / camera.zoom);
+    ctx.strokeStyle = wallTopColor;
+    ctx.stroke();
+  }
 }
 
 function drawTreeCluster(cx, cy, sz, szY) {
