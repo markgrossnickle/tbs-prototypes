@@ -129,6 +129,33 @@
     .tech-row.done { opacity: 0.7; }
     .tech-row.done .t-done { font-size: 11px; color: #4ade80; font-weight: 600; }
 
+    /* Level-up reward picker — centered modal, same visual language as techPanel.
+       Shown when an owned city has pendingRewardLevel set (GDD §2.3). */
+    #rewardPicker {
+      position: fixed;
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%);
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      padding: 14px 16px;
+      min-width: 280px;
+      max-width: 380px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.55);
+      z-index: 45;
+      display: none;
+      text-align: center;
+    }
+    #rewardPicker .rp-title { font-weight: 600; font-size: 16px; margin-bottom: 4px; }
+    #rewardPicker .rp-sub { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+    #rewardPicker .rp-row { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+    #rewardPicker .rp-btn { background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 10px; cursor: pointer; text-align: left; }
+    #rewardPicker .rp-btn:hover:not(:disabled) { background: #1a2542; }
+    #rewardPicker .rp-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+    #rewardPicker .rp-btn .rp-name { font-weight: 600; font-size: 13px; margin-bottom: 3px; }
+    #rewardPicker .rp-btn .rp-desc { font-size: 11px; color: var(--muted); }
+
     /* Pass-the-device screen */
     #passOverlay {
       position: fixed;
@@ -285,6 +312,21 @@
     <button class="ap-close" id="fpCloseBtn">Close</button>
   </div>
 
+  <div id="rewardPicker">
+    <div class="rp-title" id="rpTitle">Choose Reward</div>
+    <div class="rp-sub" id="rpSub">Your city has leveled up — pick one.</div>
+    <div class="rp-row">
+      <button class="rp-btn" id="rpBtnA">
+        <div class="rp-name" id="rpBtnAName">A</div>
+        <div class="rp-desc" id="rpBtnADesc"></div>
+      </button>
+      <button class="rp-btn" id="rpBtnB">
+        <div class="rp-name" id="rpBtnBName">B</div>
+        <div class="rp-desc" id="rpBtnBDesc"></div>
+      </button>
+    </div>
+  </div>
+
   <div id="passOverlay">
     <h1 id="passTitle">Pass to Player 2</h1>
     <p>Hand the device over. Tap the button below when ready.</p>
@@ -337,6 +379,31 @@ const WALL_COST = 5; // cost in stars to build a wall on an owned village
 // territory the farm sits in. Mirrors server FARM_COST/STARS_PER_FARM.
 const FARM_COST = 5;
 const STARS_PER_FARM = 1;
+
+// ---- GDD §2.3 City levels + per-level rewards ----
+// Mirrors /server/src/game/state.ts. v0 caps at MAX_CITY_LEVEL; pop growth is
+// +1 per owned city per end-of-turn (GDD models fruit/ruins; simplification).
+const MAX_CITY_LEVEL = 5;
+const POP_PER_TURN_PER_CITY = 1;
+const POPULATION_REWARD_AMOUNT = 3;
+function popToNextLevel(level) { return level + 1; }
+const REWARDS_BY_LEVEL = {
+  2: ['workshop', 'explorer'],
+  3: ['wall', 'resources'],
+  4: ['population', 'border'],
+  5: ['park', 'titan'],
+};
+const IMPLEMENTED_REWARDS = ['workshop', 'wall', 'population', 'park'];
+const REWARD_META = {
+  workshop:   { label: 'Workshop',     desc: '+1 SPT' },
+  explorer:   { label: 'Explorer',     desc: '(coming soon) reveal fog' },
+  wall:       { label: 'City Wall',    desc: '×4 ground defense' },
+  resources:  { label: 'Resources',    desc: '(coming soon) +5 stars' },
+  population: { label: 'Population',   desc: '+3 city pop' },
+  border:     { label: 'Border Growth',desc: '(coming soon) +1 ring' },
+  park:       { label: 'Park',         desc: '+1 SPT' },
+  titan:      { label: 'Super Unit',   desc: '(coming soon) Titan' },
+};
 
 // ---- Tech tree v0 ----
 // Three flat-cost (5★) instant researches that gate unit production.
@@ -651,7 +718,13 @@ function generateMap(seed, radius) {
     const ringDist = radius - Math.max(Math.abs(q), Math.abs(r), Math.abs(s));
     if (ringDist === 0 && rng() < 0.55) type = TILE.WATER;
     else if (ringDist === 1 && rng() < 0.22) type = TILE.WATER;
-    return { q, r, type, hasVillage: false, ownerPlayer: null, isCapital: false, hasWall: false, hasFarm: false };
+    return {
+      q, r, type,
+      hasVillage: false, ownerPlayer: null, isCapital: false,
+      hasWall: false, hasFarm: false,
+      // GDD §2.3 city fields (only meaningful when hasVillage).
+      cityLevel: 1, cityPop: 0, pendingRewardLevel: null, builtRewards: [],
+    };
   });
 
   // Villages on plains
@@ -731,10 +804,59 @@ function newGame(seed) {
 function buildWallLocal(state, village) {
   if (village.ownerPlayer !== state.currentPlayer) return false;
   if (village.hasWall) return false;
+  // GDD §2.3: standalone BuildWall now gated on cityLevel >= 3 (wall is the
+  // level-3 reward). Mirrors server rules.ts CITY_LEVEL_TOO_LOW.
+  if (village.cityLevel < 3) return false;
   const player = state.players[state.currentPlayer];
   if (player.stars < WALL_COST) return false;
   player.stars -= WALL_COST;
   village.hasWall = true;
+  return true;
+}
+
+// GDD §2.3 city helpers — production cap counts owned units within 1 hex of
+// the city tile. cityIncome adds (level-1) + workshop/park flat bonuses.
+function unitsCountedByCity(state, city) {
+  let n = 0;
+  for (const u of state.units) {
+    if (u.player !== city.ownerPlayer) continue;
+    if (hexDistance(city.q, city.r, u.q, u.r) <= 1) n += 1;
+  }
+  return n;
+}
+function cityIncome(city) {
+  if (!city.hasVillage || city.ownerPlayer === null) return 0;
+  let stars = STARS_PER_VILLAGE + (city.cityLevel - 1);
+  if (city.builtRewards.includes('workshop')) stars += 1;
+  if (city.builtRewards.includes('park')) stars += 1;
+  return stars;
+}
+
+// Apply a level-up reward choice. Mirrors server rules.ts chooseReward.
+// Returns true on success, false on rejection (silent — UI guards menu).
+function chooseRewardLocal(state, city, reward) {
+  if (!city || !city.hasVillage) return false;
+  if (city.ownerPlayer !== state.currentPlayer) return false;
+  if (city.pendingRewardLevel === null) return false;
+  const menu = REWARDS_BY_LEVEL[city.pendingRewardLevel] || [];
+  if (!menu.includes(reward)) return false;
+  if (!IMPLEMENTED_REWARDS.includes(reward)) return false;
+  switch (reward) {
+    case 'workshop':
+    case 'park':
+      break;
+    case 'wall':
+      if (city.hasWall) return false;
+      city.hasWall = true;
+      break;
+    case 'population':
+      city.cityPop += POPULATION_REWARD_AMOUNT;
+      break;
+    default:
+      return false;
+  }
+  city.builtRewards.push(reward);
+  city.pendingRewardLevel = null;
   return true;
 }
 
@@ -768,6 +890,8 @@ function trainUnit(state, village, type) {
   const player = state.players[state.currentPlayer];
   if (village.ownerPlayer !== state.currentPlayer) return false;
   if (state.unitAt(village.q, village.r)) return false;
+  // GDD §2.3 production cap: cityLevel == max units within city territory.
+  if (unitsCountedByCity(state, village) >= village.cityLevel) return false;
   // Tech gate (mirrors server rules.ts trainUnit). Warrior is always allowed.
   const required = UNIT_TECH_REQUIREMENT[type];
   if (required && !player.researchedTechs.includes(required)) return false;
@@ -855,12 +979,14 @@ function attackUnit(state, attacker, defender) {
 }
 
 function startTurn(state) {
-  // Star income — villages (+2★) + farms (+1★).
-  // Farm income goes to whichever player's territory the farm sits in NOW,
-  // recomputed each call (see ownedFarms in state). Mirrors server rules.ts.
-  const owned = state.ownedVillages(state.currentPlayer).length;
+  // Star income — cityIncome() per village (GDD §2.2 base + §2.3 level/reward
+  // bonuses) + farms (+1★ per farm in own territory).
+  let cityStars = 0;
+  for (const v of state.ownedVillages(state.currentPlayer)) {
+    cityStars += cityIncome(v);
+  }
   const farms = state.ownedFarms(state.currentPlayer).length;
-  state.players[state.currentPlayer].stars += STARS_PER_VILLAGE * owned + STARS_PER_FARM * farms;
+  state.players[state.currentPlayer].stars += cityStars + STARS_PER_FARM * farms;
   // Wake up all of this player's units (units trained THIS turn get summoning sickness off next turn)
   for (const u of state.units) {
     if (u.player === state.currentPlayer) {
@@ -897,6 +1023,29 @@ function endTurn(state) {
     if (u.hp >= maxHp) continue;
     const heal = isOwnTerritory(state, u.q, u.r, u.player) ? 4 : 2;
     u.hp = Math.min(maxHp, u.hp + heal);
+  }
+  // GDD §2.3 city pop growth + level-up. Applied to active player's owned
+  // cities BEFORE the turn pointer flips. One pending reward at a time per
+  // city — once cityPop hits threshold the level bumps and pendingRewardLevel
+  // is set; further growth is capped at threshold until the player picks.
+  for (const c of state.map.tiles) {
+    if (!c.hasVillage || c.ownerPlayer !== state.currentPlayer) continue;
+    c.cityPop += POP_PER_TURN_PER_CITY;
+    if (c.pendingRewardLevel !== null) {
+      const cap = popToNextLevel(c.cityLevel);
+      if (c.cityPop > cap) c.cityPop = cap;
+      continue;
+    }
+    if (c.cityLevel >= MAX_CITY_LEVEL) continue;
+    const threshold = popToNextLevel(c.cityLevel);
+    if (c.cityPop >= threshold) {
+      c.cityPop -= threshold;
+      c.cityLevel += 1;
+      c.pendingRewardLevel = c.cityLevel;
+      // Full-heal garrisoned unit (GDD §2.3).
+      const garrison = state.units.find(u => u.q === c.q && u.r === c.r);
+      if (garrison) garrison.hp = UNIT_STATS[garrison.type].hp;
+    }
   }
   // Check win: own at least one village and opponent owns none.
   for (let p = 0; p < 2; p++) {
@@ -1536,6 +1685,11 @@ function adoptServerView(view, header) {
       isCapital: !!t.isCapital,
       hasWall: !!t.hasWall,
       hasFarm: !!t.hasFarm,
+      // GDD §2.3 city fields. Default safely if server view omits them.
+      cityLevel: typeof t.cityLevel === 'number' ? t.cityLevel : 1,
+      cityPop: typeof t.cityPop === 'number' ? t.cityPop : 0,
+      pendingRewardLevel: t.pendingRewardLevel ?? null,
+      builtRewards: Array.isArray(t.builtRewards) ? t.builtRewards.slice() : [],
     };
   });
   const state = {
@@ -1710,6 +1864,28 @@ async function clientBuildWall(village) {
     await netRefreshAndRender();
   } catch (err) {
     console.warn('BuildWall failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
+async function clientChooseReward(city, reward) {
+  if (!NET.enabled) {
+    if (chooseRewardLocal(game, city, reward)) { playSfx('build'); updateAll(); }
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'ChooseReward',
+      city: { q: city.q, r: city.r },
+      reward,
+    });
+    playSfx('build');
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('ChooseReward failed:', err);
   } finally {
     NET.inFlight = false;
   }
@@ -2763,7 +2939,10 @@ function updateHoverPill() {
 // isn't researched we disable the button, change the cost label to
 // "Need <Tech>", and set a title tooltip. When researched the cost reverts
 // to the unit's star cost.
-function applyTrainBtnGate(btn, unitType, empty, stars, researched) {
+//
+// Also gates on city production cap (GDD §2.3): if the city is at its cap
+// (units in territory >= cityLevel) we disable with a "Cap reached" tooltip.
+function applyTrainBtnGate(btn, unitType, empty, stars, researched, capReached) {
   const required = UNIT_TECH_REQUIREMENT[unitType];
   const techOk = !required || researched.includes(required);
   const costSpan = btn.querySelector('.ap-cost');
@@ -2771,11 +2950,17 @@ function applyTrainBtnGate(btn, unitType, empty, stars, researched) {
     btn.disabled = true;
     if (costSpan) costSpan.textContent = `Need ${TECH_META[required].label}`;
     btn.title = `Research ${TECH_META[required].label} to unlock ${UNIT_STATS[unitType].label}`;
-  } else {
-    btn.disabled = !empty || stars < UNIT_STATS[unitType].cost;
-    if (costSpan) costSpan.textContent = `${UNIT_STATS[unitType].cost}★`;
-    btn.title = '';
+    return;
   }
+  if (capReached) {
+    btn.disabled = true;
+    if (costSpan) costSpan.textContent = `${UNIT_STATS[unitType].cost}★`;
+    btn.title = 'Production cap reached — level up the city';
+    return;
+  }
+  btn.disabled = !empty || stars < UNIT_STATS[unitType].cost;
+  if (costSpan) costSpan.textContent = `${UNIT_STATS[unitType].cost}★`;
+  btn.title = '';
 }
 
 function updateActionPicker() {
@@ -2789,20 +2974,36 @@ function updateActionPicker() {
       const empty = !game.unitAt(v.q, v.r);
       const stars = game.players[game.currentPlayer].stars;
       const researched = game.players[game.currentPlayer].researchedTechs;
-      apTitle.textContent = `${PLAYER_COLORS[game.currentPlayer].short} Village`;
-      apSub.textContent = empty ? `Train a unit (${stars}★ available)` : 'A unit is here';
-      applyTrainBtnGate(makeWarriorBtn,  'warrior',  empty, stars, researched);
-      applyTrainBtnGate(makeRiderBtn,    'rider',    empty, stars, researched);
-      applyTrainBtnGate(makeArcherBtn,   'archer',   empty, stars, researched);
-      applyTrainBtnGate(makeDefenderBtn, 'defender', empty, stars, researched);
-      applyTrainBtnGate(makeMarauderBtn, 'marauder', empty, stars, researched);
-      applyTrainBtnGate(makeMortarBtn,   'mortar',   empty, stars, researched);
-      applyTrainBtnGate(makeStriderBtn,  'strider',  empty, stars, researched);
-      applyTrainBtnGate(makeEmpathBtn,   'empath',   empty, stars, researched);
+      // GDD §2.3 city info: show level, pop progress, production cap, built rewards.
+      const used = unitsCountedByCity(game, v);
+      const capReached = used >= v.cityLevel;
+      const rewards = v.builtRewards.length
+        ? v.builtRewards.map(r => (REWARD_META[r]?.label || r)).join(', ')
+        : 'none';
+      const labelKind = v.isCapital ? 'Capital' : 'Village';
+      apTitle.textContent = `${PLAYER_COLORS[game.currentPlayer].short} ${labelKind} · L${v.cityLevel}`;
+      apSub.innerHTML =
+        `Pop ${v.cityPop}/${popToNextLevel(v.cityLevel)} · ` +
+        `Units ${used}/${v.cityLevel} · ${stars}★<br>` +
+        `Rewards: ${rewards}`;
+      applyTrainBtnGate(makeWarriorBtn,  'warrior',  empty, stars, researched, capReached);
+      applyTrainBtnGate(makeRiderBtn,    'rider',    empty, stars, researched, capReached);
+      applyTrainBtnGate(makeArcherBtn,   'archer',   empty, stars, researched, capReached);
+      applyTrainBtnGate(makeDefenderBtn, 'defender', empty, stars, researched, capReached);
+      applyTrainBtnGate(makeMarauderBtn, 'marauder', empty, stars, researched, capReached);
+      applyTrainBtnGate(makeMortarBtn,   'mortar',   empty, stars, researched, capReached);
+      applyTrainBtnGate(makeStriderBtn,  'strider',  empty, stars, researched, capReached);
+      applyTrainBtnGate(makeEmpathBtn,   'empath',   empty, stars, researched, capReached);
       const wallBtn = document.getElementById('buildWallBtn');
       if (wallBtn) {
-        wallBtn.disabled = v.hasWall || stars < WALL_COST;
-        wallBtn.querySelector('span:nth-child(2)').textContent = v.hasWall ? 'Shielded' : 'Energy Shield';
+        // GDD §2.3 wall is the level-3 reward; standalone purchase gated too.
+        const levelOk = v.cityLevel >= 3;
+        wallBtn.disabled = v.hasWall || stars < WALL_COST || !levelOk;
+        const label = v.hasWall
+          ? 'Shielded'
+          : (levelOk ? 'Energy Shield' : 'Wall · L3+');
+        wallBtn.querySelector('span:nth-child(2)').textContent = label;
+        wallBtn.title = levelOk ? '' : 'City must be level 3 to build a wall';
       }
       return;
     }
@@ -2889,10 +3090,67 @@ function openTechPanel() {
 }
 function closeTechPanel() { techPanel.style.display = 'none'; }
 
+// GDD §2.3: find the active player's first owned city with pendingRewardLevel
+// set. Returns the tile or null. Used to drive the reward modal — at most one
+// pending choice per city, one city at a time.
+function firstPendingRewardCity(state) {
+  for (const t of state.map.tiles) {
+    if (!t.hasVillage) continue;
+    if (t.ownerPlayer !== state.currentPlayer) continue;
+    if (t.pendingRewardLevel !== null) return t;
+  }
+  return null;
+}
+
+function updateRewardPicker() {
+  const picker = document.getElementById('rewardPicker');
+  if (!picker) return;
+  // Don't show during pass screen or win screen.
+  if (game.phase !== 'play') {
+    picker.style.display = 'none';
+    return;
+  }
+  // Online: only show on YOUR turn.
+  if (NET.enabled && !isMyTurn()) {
+    picker.style.display = 'none';
+    return;
+  }
+  const city = firstPendingRewardCity(game);
+  if (!city) {
+    picker.style.display = 'none';
+    return;
+  }
+  const menu = REWARDS_BY_LEVEL[city.pendingRewardLevel] || [];
+  const [aId, bId] = menu;
+  const titleEl = document.getElementById('rpTitle');
+  const subEl = document.getElementById('rpSub');
+  const aBtn = document.getElementById('rpBtnA');
+  const bBtn = document.getElementById('rpBtnB');
+  const aName = document.getElementById('rpBtnAName');
+  const aDesc = document.getElementById('rpBtnADesc');
+  const bName = document.getElementById('rpBtnBName');
+  const bDesc = document.getElementById('rpBtnBDesc');
+  const labelKind = city.isCapital ? 'Capital' : 'Village';
+  titleEl.textContent = `Level ${city.cityLevel} ${labelKind} — Choose a Reward`;
+  subEl.textContent = `Your city at (${city.q}, ${city.r}) leveled up. Pick one bonus.`;
+  const a = REWARD_META[aId];
+  const b = REWARD_META[bId];
+  aName.textContent = a.label;
+  aDesc.textContent = a.desc;
+  bName.textContent = b.label;
+  bDesc.textContent = b.desc;
+  aBtn.disabled = !IMPLEMENTED_REWARDS.includes(aId);
+  bBtn.disabled = !IMPLEMENTED_REWARDS.includes(bId);
+  aBtn.onclick = () => { clientChooseReward(city, aId); };
+  bBtn.onclick = () => { clientChooseReward(city, bId); };
+  picker.style.display = 'block';
+}
+
 function updateAll() {
   updateTopBar();
   updateHoverPill();
   updateActionPicker();
+  updateRewardPicker();
   if (techPanel && techPanel.style.display === 'block') renderTechPanel();
   draw();
 }
@@ -2965,6 +3223,19 @@ apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
 endTurnBtn.addEventListener('click', () => {
   if (game.phase !== 'play') return;
+  // GDD §2.3: cannot end turn while a city has a pending reward choice.
+  // The reward modal is already on-screen via updateRewardPicker(); just
+  // bail. Online play uses the same guard (server would reject anyway when
+  // a future track gates EndTurn, but the UI hint is cheap).
+  if (firstPendingRewardCity(game)) {
+    if (NET.enabled && !isMyTurn()) {
+      // not our turn anyway
+    } else {
+      // surface modal & nudge
+      updateRewardPicker();
+      return;
+    }
+  }
   if (NET.enabled) {
     // Online: post EndTurn, then refresh. No pass overlay.
     clientEndTurn();
