@@ -838,16 +838,24 @@ function newGame(seed, p0Tribe = 'cyborg', p1Tribe = 'hive') {
   // GDD §5 Cyborg: seed researchedTechs with 'riding' so Scout is turn-1 available.
   const p0Techs = p0Tribe === 'cyborg' ? ['riding'] : [];
   const p1Techs = p1Tribe === 'cyborg' ? ['riding'] : [];
+  // Each player starts with a Trooper on their capital, fully usable turn 1.
+  const cap0 = map.tiles.find(t => t.isCapital && t.ownerPlayer === 0);
+  const cap1 = map.tiles.find(t => t.isCapital && t.ownerPlayer === 1);
+  const w = UNIT_STATS.warrior;
+  const units = [];
+  let seq = 0;
+  if (cap0) units.push({ id: `u-0-0-${seq++}`, q: cap0.q, r: cap0.r, type: 'warrior', player: 0, hp: w.hp, canMove: true, canAttack: true, hasMovedThisTurn: false });
+  if (cap1) units.push({ id: `u-0-1-${seq++}`, q: cap1.q, r: cap1.r, type: 'warrior', player: 1, hp: w.hp, canMove: true, canAttack: true, hasMovedThisTurn: false });
   const state = {
     map,
-    units: [],
+    units,
     players: [
       { id: 0, stars: STARTING_STARS, researchedTechs: p0Techs, tribe: p0Tribe },
       { id: 1, stars: STARTING_STARS, researchedTechs: p1Techs, tribe: p1Tribe },
     ],
     currentPlayer: 0,
     turn: 1,
-    nextUnitSeq: 0,
+    nextUnitSeq: seq,
     phase: 'play', // 'play' | 'pass' | 'won'
     winner: null,
     selected: null, // { kind: 'unit'|'village', q, r }
@@ -955,8 +963,8 @@ function trainUnit(state, village, type) {
   const player = state.players[state.currentPlayer];
   if (village.ownerPlayer !== state.currentPlayer) return false;
   if (state.unitAt(village.q, village.r)) return false;
-  // GDD §2.3 production cap: cityLevel == max units within city territory.
-  if (unitsCountedByCity(state, village) >= village.cityLevel) return false;
+  // Production cap = cityLevel + 1 (L1 → 2 units, L2 → 3, etc.).
+  if (unitsCountedByCity(state, village) >= village.cityLevel + 1) return false;
   // Tech gate (mirrors server rules.ts trainUnit). Warrior is always allowed.
   const required = UNIT_TECH_REQUIREMENT[type];
   if (required && !player.researchedTechs.includes(required)) return false;
@@ -3077,7 +3085,7 @@ function updateActionPicker() {
       const researched = game.players[game.currentPlayer].researchedTechs;
       // GDD §2.3 city info: show level, pop progress, production cap, built rewards.
       const used = unitsCountedByCity(game, v);
-      const capReached = used >= v.cityLevel;
+      const capReached = used >= v.cityLevel + 1;
       const rewards = v.builtRewards.length
         ? v.builtRewards.map(r => (REWARD_META[r]?.label || r)).join(', ')
         : 'none';
@@ -3085,7 +3093,7 @@ function updateActionPicker() {
       apTitle.textContent = `${PLAYER_COLORS[game.currentPlayer].short} ${labelKind} · L${v.cityLevel}`;
       apSub.innerHTML =
         `Pop ${v.cityPop}/${popToNextLevel(v.cityLevel)} · ` +
-        `Units ${used}/${v.cityLevel} · ${stars}★<br>` +
+        `Units ${used}/${v.cityLevel + 1} · ${stars}★<br>` +
         `Rewards: ${rewards}`;
       applyTrainBtnGate(makeWarriorBtn,  'warrior',  empty, stars, researched, capReached);
       applyTrainBtnGate(makeRiderBtn,    'rider',    empty, stars, researched, capReached);
