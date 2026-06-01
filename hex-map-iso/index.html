@@ -74,8 +74,8 @@
     #endTurnBtn.p2 { background: var(--p2); }
     #endTurnBtn:active { transform: scale(0.97); }
 
-    /* Action picker (village, unit, or build-farm plains) */
-    #actionPicker, #farmPicker {
+    /* Action picker (village, unit, build-farm plains, harvest tile) */
+    #actionPicker, #farmPicker, #harvestPicker {
       position: fixed;
       left: 50%;
       transform: translateX(-50%);
@@ -348,6 +348,17 @@
     <button class="ap-close" id="fpCloseBtn">Close</button>
   </div>
 
+  <div id="harvestPicker">
+    <div class="ap-title" id="hpTitle">Resource</div>
+    <div class="ap-sub" id="hpSub">Harvest for +1 city pop</div>
+    <button class="ap-btn" id="harvestBtn" style="width:100%;flex-direction:row;justify-content:center;margin-bottom:8px;">
+      <div class="ap-icon" id="hpIcon" style="background:#ef4444"></div>
+      <span id="hpLabel">Harvest</span>
+      <span class="ap-cost" id="hpCost">2★</span>
+    </button>
+    <button class="ap-close" id="hpCloseBtn">Close</button>
+  </div>
+
   <div id="rewardPicker">
     <div class="rp-title" id="rpTitle">Choose Reward</div>
     <div class="rp-sub" id="rpSub">Your city has leveled up — pick one.</div>
@@ -417,10 +428,10 @@ const FARM_COST = 5;
 const STARS_PER_FARM = 1;
 
 // ---- GDD §2.3 City levels + per-level rewards ----
-// Mirrors /server/src/game/state.ts. v0 caps at MAX_CITY_LEVEL; pop growth is
-// +1 per owned city per end-of-turn (GDD models fruit/ruins; simplification).
+// Mirrors /server/src/game/state.ts. v0 caps at MAX_CITY_LEVEL.
+// Track 2 (2026-05-31): pop is granted exclusively via HarvestResource
+// (GDD §2.2) and the 'population' L4 reward — no passive growth.
 const MAX_CITY_LEVEL = 5;
-const POP_PER_TURN_PER_CITY = 1;
 const POPULATION_REWARD_AMOUNT = 3;
 function popToNextLevel(level) { return level + 1; }
 const REWARDS_BY_LEVEL = {
@@ -447,7 +458,12 @@ const REWARD_META = {
 // GDD §2.5 has a per-tier cost formula; deferred for prototype. Mirrors
 // server/src/game/state.ts constants.
 const TECH_COST = 5;
-const TECH_IDS = ['riding', 'archery', 'strategy', 'smithery', 'ballistics', 'cavalry', 'psionics'];
+const TECH_IDS = [
+  'riding', 'archery', 'strategy', 'smithery', 'ballistics', 'cavalry', 'psionics',
+  // Track 2 (GDD §2.2) resource-gate techs. Do NOT unlock units; gate
+  // HarvestResource on the matching terrain. Flat cost like the rest.
+  'hunting', 'fishing', 'mining',
+];
 const TECH_META = {
   riding:     { label: 'Riding',     unlocksLabel: 'Rider',        unitType: 'rider',    color: '#78350f' },
   archery:    { label: 'Archery',    unlocksLabel: 'Archer',       unitType: 'archer',   color: '#15803d' },
@@ -456,6 +472,27 @@ const TECH_META = {
   ballistics: { label: 'Ballistics', unlocksLabel: 'Mortar Drone', unitType: 'mortar',   color: '#374151' },
   cavalry:    { label: 'Cavalry',    unlocksLabel: 'Strider',      unitType: 'strider',  color: '#0e7490' },
   psionics:   { label: 'Psionics',   unlocksLabel: 'Empath',       unitType: 'empath',   color: '#a78bfa' },
+  hunting:    { label: 'Hunting',    unlocksLabel: 'Harvest Beast',unitType: null,        color: '#65a30d' },
+  fishing:    { label: 'Fishing',    unlocksLabel: 'Harvest Shoal',unitType: null,        color: '#0284c7' },
+  mining:     { label: 'Mining',     unlocksLabel: 'Harvest Ore',  unitType: null,        color: '#6b7280' },
+};
+
+// ---- Resources (GDD §2.2) ----
+// Harvestable tile decorations. UI labels use the sci-fi rename per task:
+//   fruit  → Crystal (red)
+//   animal → Beast   (green) — needs Hunting
+//   fish   → Shoal   (blue)  — needs Fishing
+//   metal  → Ore     (grey)  — needs Mining
+// HARVEST_COST stars → +1 pop on nearest owned village. Mirrors server.
+const HARVEST_COST = 2;
+const RESOURCE_PROB = { plains: 0.30, trees: 0.50, water: 0.30, mountain: 0.50 };
+const RESOURCE_FOR_TERRAIN = { plains: 'fruit', trees: 'animal', water: 'fish', mountain: 'metal' };
+const RESOURCE_TECH = { fruit: null, animal: 'hunting', fish: 'fishing', metal: 'mining' };
+const RESOURCE_META = {
+  fruit:  { label: 'Crystal', color: '#ef4444' },
+  animal: { label: 'Beast',   color: '#22c55e' },
+  fish:   { label: 'Shoal',   color: '#3b82f6' },
+  metal:  { label: 'Ore',     color: '#9ca3af' },
 };
 // ---- GDD §5 tribe asymmetric mechanics ----
 // Each tribe gets ONE distinct passive (mirrors server/prototype):
@@ -794,6 +831,8 @@ function generateMap(seed, radius) {
       hasWall: false, hasFarm: false,
       // GDD §2.3 city fields (only meaningful when hasVillage).
       cityLevel: 1, cityPop: 0, pendingRewardLevel: null, builtRewards: [],
+      // Resource (GDD §2.2): placed below after villages, never on villages.
+      resource: null,
     };
   });
 
@@ -836,6 +875,16 @@ function generateMap(seed, radius) {
   // Capitals start walled (GDD §2.3 City Wall, ×4 def). Other villages unwalled.
   if (p1V) { p1V.ownerPlayer = 0; p1V.isCapital = true; p1V.hasWall = true; }
   if (p2V) { p2V.ownerPlayer = 1; p2V.isCapital = true; p2V.hasWall = true; }
+
+  // Resource placement (GDD §2.2). Same seeded rng → fully deterministic.
+  // Skip villages and capitals so resources never collide with cities.
+  for (const t of tiles) {
+    if (t.hasVillage || t.isCapital) continue;
+    const prob = RESOURCE_PROB[t.type];
+    const res = RESOURCE_FOR_TERRAIN[t.type];
+    if (!res) continue;
+    if (rng() < prob) t.resource = res;
+  }
 
   return { radius, tiles, seed };
 }
@@ -957,6 +1006,38 @@ function buildFarmLocal(state, tile) {
   player.stars -= FARM_COST;
   tile.hasFarm = true;
   return true;
+}
+
+// HarvestResource (GDD §2.2): spend HARVEST_COST stars to clear the tile's
+// resource and add +1 cityPop to the NEAREST owned village (lexicographic
+// axial key tie-break). Mirrors server rules.ts harvestResource. Returns
+// the village tile that received the pop, or null on rejection.
+function harvestResourceLocal(state, tile) {
+  if (!tile || !tile.resource) return null;
+  if (!isOwnTerritory(state, tile.q, tile.r, state.currentPlayer)) return null;
+  const required = RESOURCE_TECH[tile.resource];
+  const player = state.players[state.currentPlayer];
+  if (required && !player.researchedTechs.includes(required)) return null;
+  if (player.stars < HARVEST_COST) return null;
+  const ownedVs = state.map.tiles.filter(
+    v => v.hasVillage && v.ownerPlayer === state.currentPlayer
+  );
+  if (ownedVs.length === 0) return null;
+  let target = ownedVs[0];
+  let bestDist = hexDistance(target.q, target.r, tile.q, tile.r);
+  let bestKey = `${target.q},${target.r}`;
+  for (let i = 1; i < ownedVs.length; i++) {
+    const v = ownedVs[i];
+    const d = hexDistance(v.q, v.r, tile.q, tile.r);
+    const k = `${v.q},${v.r}`;
+    if (d < bestDist || (d === bestDist && k < bestKey)) {
+      target = v; bestDist = d; bestKey = k;
+    }
+  }
+  player.stars -= HARVEST_COST;
+  tile.resource = null;
+  target.cityPop += 1;
+  return target;
 }
 
 function researchTech(state, tech) {
@@ -1131,13 +1212,13 @@ function endTurn(state) {
     const heal = isOwnTerritory(state, u.q, u.r, u.player) ? healOwn : healAway;
     u.hp = Math.min(maxHp, u.hp + heal);
   }
-  // GDD §2.3 city pop growth + level-up. Applied to active player's owned
-  // cities BEFORE the turn pointer flips. One pending reward at a time per
-  // city — once cityPop hits threshold the level bumps and pendingRewardLevel
-  // is set; further growth is capped at threshold until the player picks.
+  // GDD §2.3 city level-up. Track 2 (2026-05-31): NO passive pop growth here —
+  // population is granted exclusively via HarvestResource (GDD §2.2) and the
+  // 'population' L4 reward. This loop only checks whether any city's cityPop
+  // crossed the threshold (from harvest banked earlier in the turn) and
+  // promotes it. Pop is capped at threshold while a reward is pending.
   for (const c of state.map.tiles) {
     if (!c.hasVillage || c.ownerPlayer !== state.currentPlayer) continue;
-    c.cityPop += POP_PER_TURN_PER_CITY;
     if (c.pendingRewardLevel !== null) {
       const cap = popToNextLevel(c.cityLevel);
       if (c.cityPop > cap) c.cityPop = cap;
@@ -1820,6 +1901,8 @@ function adoptServerView(view, header) {
       cityPop: typeof t.cityPop === 'number' ? t.cityPop : 0,
       pendingRewardLevel: t.pendingRewardLevel ?? null,
       builtRewards: Array.isArray(t.builtRewards) ? t.builtRewards.slice() : [],
+      // GDD §2.2 resource. Server fog-filter nulls out hidden tiles already.
+      resource: t.resource ?? null,
     };
   });
   const state = {
@@ -2042,6 +2125,36 @@ async function clientBuildFarm(tile) {
   }
 }
 
+// Harvest a resource (GDD §2.2). Spends HARVEST_COST stars → +1 pop on
+// nearest owned village; resource is cleared from the tile. In online play
+// routes through netSubmitIntent like other intents.
+async function clientHarvestResource(tile) {
+  if (!NET.enabled) {
+    const village = harvestResourceLocal(game, tile);
+    if (village) {
+      playSfx('build');
+      // Resource is gone — drop the selection so the picker hides cleanly.
+      clearSelection();
+    }
+    return;
+  }
+  if (!isMyTurn() || NET.inFlight) return;
+  NET.inFlight = true;
+  try {
+    await netSubmitIntent({
+      kind: 'HarvestResource',
+      tile: { q: tile.q, r: tile.r },
+    });
+    playSfx('build');
+    clearSelection();
+    await netRefreshAndRender();
+  } catch (err) {
+    console.warn('HarvestResource failed:', err);
+  } finally {
+    NET.inFlight = false;
+  }
+}
+
 // Snapshot village ownership before an end-turn so we can detect captures
 // after the resolver runs. Used by 3 call sites (offline endTurn, online,
 // AI endTurn) to fire the capture jingle.
@@ -2232,7 +2345,33 @@ function drawTile(tile) {
     // Farm improvement (prototype v0). Drawn ONLY on plains-without-village
     // tiles, which is the only place BuildFarm is legal.
     drawFarm(topCenter.x, topCenter.y, sz, szY);
+  } else if (tile.resource) {
+    // Resource glyph (GDD §2.2). Procedural minimal dot — color per resource.
+    drawResourceGlyph(topCenter.x, topCenter.y, sz, szY, tile.resource);
   }
+}
+
+// Small colored dot for a harvestable resource on a tile (GDD §2.2).
+// Procedural & cheap — sits a hair above the tile center so it doesn't
+// fight with terrain icons.
+function drawResourceGlyph(cx, cy, sz, szY, resource) {
+  const meta = RESOURCE_META[resource];
+  if (!meta) return;
+  const radius = Math.max(3, sz * 0.18);
+  const cy2 = cy - szY * 0.05;
+  // Dark drop ring for legibility against any terrain.
+  ctx.beginPath();
+  ctx.arc(cx, cy2 + 1, radius, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fill();
+  // Colored dot.
+  ctx.beginPath();
+  ctx.arc(cx, cy2, radius, 0, Math.PI * 2);
+  ctx.fillStyle = meta.color;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+  ctx.lineWidth = Math.max(0.5, 0.8 / camera.zoom);
+  ctx.stroke();
 }
 
 function drawWalls(topCorners, sz, depth) {
@@ -2796,6 +2935,9 @@ function draw() {
     // identically. (Picker differentiates by available actions.)
     drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
   }
+  if (game.selected && game.selected.kind === 'resource') {
+    drawHexRingAt(game.selected.q, game.selected.r, '#facc15', 3, false);
+  }
 }
 
 // ============================================================
@@ -2948,6 +3090,20 @@ function handleTap(sx, sy) {
     return;
   }
 
+  // Resource tile inside current player's territory — show Harvest picker.
+  // Checked BEFORE the plains/farm branch so a fruit-on-plains tile opens
+  // Harvest (not Build Farm). Track 2 (GDD §2.2).
+  if (
+    tile.resource &&
+    !u &&
+    isOwnTerritory(game, tile.q, tile.r, game.currentPlayer) &&
+    (!NET.enabled || isMyTurn())
+  ) {
+    game.selected = { kind: 'resource', q: tile.q, r: tile.r };
+    updateAll();
+    return;
+  }
+
   // Select an empty plains tile inside current player's territory — this is
   // a Build-Farm candidate. Restricted to plains (per BuildFarm rules) and
   // tiles without a farm or village. Only on the human's own turn (so the
@@ -2956,6 +3112,7 @@ function handleTap(sx, sy) {
     tile.type === TILE.PLAINS &&
     !tile.hasVillage &&
     !tile.hasFarm &&
+    !tile.resource &&
     !u &&
     isOwnTerritory(game, tile.q, tile.r, game.currentPlayer) &&
     (!NET.enabled || isMyTurn())
@@ -3066,6 +3223,14 @@ function updateHoverPill() {
     hoverPill.textContent = `Plains · can build Farm (${FARM_COST}★)`;
     return;
   }
+  if (game.selected && game.selected.kind === 'resource') {
+    const t = game.tileAt(game.selected.q, game.selected.r);
+    if (t && t.resource) {
+      const meta = RESOURCE_META[t.resource];
+      hoverPill.textContent = `${meta.label} · Harvest (${HARVEST_COST}★)`;
+      return;
+    }
+  }
   hoverPill.textContent = 'tap your unit or outpost';
 }
 
@@ -3098,13 +3263,15 @@ function applyTrainBtnGate(btn, unitType, empty, stars, researched, capReached) 
 }
 
 function updateActionPicker() {
-  // Default both panels hidden; we'll re-show the appropriate one below.
+  // Default all panels hidden; we'll re-show the appropriate one below.
   const farmPicker = document.getElementById('farmPicker');
+  const harvestPicker = document.getElementById('harvestPicker');
   if (game.selected && game.selected.kind === 'village') {
     const v = game.villageAt(game.selected.q, game.selected.r);
     if (v && v.ownerPlayer === game.currentPlayer) {
       actionPicker.style.display = 'block';
       if (farmPicker) farmPicker.style.display = 'none';
+      if (harvestPicker) harvestPicker.style.display = 'none';
       const empty = !game.unitAt(v.q, v.r);
       const stars = game.players[game.currentPlayer].stars;
       const researched = game.players[game.currentPlayer].researchedTechs;
@@ -3151,6 +3318,7 @@ function updateActionPicker() {
       t.type === TILE.PLAINS &&
       !t.hasVillage &&
       !t.hasFarm &&
+      !t.resource &&
       !game.unitAt(t.q, t.r) &&
       isOwnTerritory(game, t.q, t.r, game.currentPlayer)
     ) {
@@ -3164,11 +3332,54 @@ function updateActionPicker() {
         }
       }
       actionPicker.style.display = 'none';
+      if (harvestPicker) harvestPicker.style.display = 'none';
+      return;
+    }
+  }
+  // Resource selection — show Harvest picker. Track 2 (GDD §2.2).
+  if (game.selected && game.selected.kind === 'resource') {
+    const t = game.tileAt(game.selected.q, game.selected.r);
+    if (
+      t &&
+      t.resource &&
+      !game.unitAt(t.q, t.r) &&
+      isOwnTerritory(game, t.q, t.r, game.currentPlayer)
+    ) {
+      const meta = RESOURCE_META[t.resource];
+      const player = game.players[game.currentPlayer];
+      const required = RESOURCE_TECH[t.resource];
+      const techOk = !required || player.researchedTechs.includes(required);
+      const stars = player.stars;
+      if (harvestPicker) {
+        harvestPicker.style.display = 'block';
+        const hpTitle = document.getElementById('hpTitle');
+        const hpSub = document.getElementById('hpSub');
+        const hpIcon = document.getElementById('hpIcon');
+        const hpLabel = document.getElementById('hpLabel');
+        const hpCost = document.getElementById('hpCost');
+        const harvestBtn = document.getElementById('harvestBtn');
+        if (hpTitle) hpTitle.textContent = `${meta.label} (${t.resource})`;
+        if (hpSub) hpSub.textContent =
+          techOk ? `Harvest for +1 city pop (${stars}★ available)`
+                 : `Need ${TECH_META[required].label} tech to harvest`;
+        if (hpIcon) hpIcon.style.background = meta.color;
+        if (hpLabel) hpLabel.textContent = `Harvest ${meta.label}`;
+        if (hpCost) hpCost.textContent = techOk
+          ? `${HARVEST_COST}★`
+          : `Need ${TECH_META[required].label}`;
+        if (harvestBtn) {
+          harvestBtn.disabled = !techOk || stars < HARVEST_COST || (NET.enabled && !isMyTurn());
+          harvestBtn.title = techOk ? '' : `Research ${TECH_META[required].label} first`;
+        }
+      }
+      actionPicker.style.display = 'none';
+      if (farmPicker) farmPicker.style.display = 'none';
       return;
     }
   }
   actionPicker.style.display = 'none';
   if (farmPicker) farmPicker.style.display = 'none';
+  if (harvestPicker) harvestPicker.style.display = 'none';
 }
 
 // ---- Tech panel ----
@@ -3358,6 +3569,18 @@ if (buildFarmBtnEl) {
 const fpCloseBtnEl = document.getElementById('fpCloseBtn');
 if (fpCloseBtnEl) {
   fpCloseBtnEl.addEventListener('click', () => { clearSelection(); });
+}
+const harvestBtnEl = document.getElementById('harvestBtn');
+if (harvestBtnEl) {
+  harvestBtnEl.addEventListener('click', () => {
+    if (!game.selected || game.selected.kind !== 'resource') return;
+    const t = game.tileAt(game.selected.q, game.selected.r);
+    if (t) clientHarvestResource(t);
+  });
+}
+const hpCloseBtnEl = document.getElementById('hpCloseBtn');
+if (hpCloseBtnEl) {
+  hpCloseBtnEl.addEventListener('click', () => { clearSelection(); });
 }
 apCloseBtn.addEventListener('click', () => { clearSelection(); });
 
