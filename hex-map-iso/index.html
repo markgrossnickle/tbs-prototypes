@@ -559,20 +559,31 @@ const TILE = {
   MOUNTAIN: { id: 'mountain', top: '#a8a29e', side: '#57534e', label: 'ridgeline', passable: true, defenseBonus: 1.5 },
 };
 
-// Skills: 'dash' (already-existing field), 'stiff' (defender never retaliates).
-// Strider's atk 3.5 is honored end-to-end by resolveCombat() — the formula
-// is float-then-round, so the half-point shows up in damage variance not
-// in code paths. Same convention as /server/src/game/units.ts.
+// Skills (GDD §2.6): stored as an array on each unit type. v0 implements
+// dash, escape, persist, surprise, stiff, fortify. splash / hide / infiltrate
+// / scout are listed in the canonical set but not yet wired (deferred with
+// Cloak/Dagger). Mirrors /server/src/game/units.ts and /prototype/src/game/
+// units.ts byte-for-byte semantically.
+//   - dash    : attack after move
+//   - escape  : move after attack (if hadn't moved yet this turn)
+//   - persist : kill restores canMove + canAttack
+//   - surprise: attacker → no defender retaliation (Dagger fiction)
+//   - stiff   : attacker → no defender retaliation (Mortar Drone fiction)
+//   - fortify : idle defender (not moved + not attacked) → ×1.5 defense bonus
 const UNIT_STATS = {
-  warrior:  { hp: 10, atk: 2,   def: 2, move: 1, range: 1, cost: 2, dash: false,                label: 'Trooper'      },
-  rider:    { hp: 10, atk: 2,   def: 1, move: 2, range: 1, cost: 3, dash: true,  skill: 'dash', label: 'Scout'        },
-  archer:   { hp: 10, atk: 2,   def: 1, move: 1, range: 2, cost: 3, dash: false,                label: 'Sniper'       },
-  defender: { hp: 15, atk: 1,   def: 3, move: 1, range: 1, cost: 3, dash: false,                label: 'Mech'         },
-  marauder: { hp: 15, atk: 3,   def: 3, move: 1, range: 1, cost: 5, dash: false,                label: 'Marauder'     },
-  mortar:   { hp: 10, atk: 4,   def: 0, move: 1, range: 3, cost: 8, dash: false, skill: 'stiff', label: 'Mortar Drone' },
-  strider:  { hp: 10, atk: 3.5, def: 1, move: 3, range: 1, cost: 8, dash: true,  skill: 'dash',  label: 'Strider'      },
-  empath:   { hp: 10, atk: 0,   def: 1, move: 1, range: 1, cost: 5, dash: false,                label: 'Empath'       },
+  warrior:  { hp: 10, atk: 2,   def: 2, move: 1, range: 1, cost: 2, skills: [],                              label: 'Trooper'      },
+  rider:    { hp: 10, atk: 2,   def: 1, move: 2, range: 1, cost: 3, skills: ['dash', 'escape'],              label: 'Scout'        },
+  archer:   { hp: 10, atk: 2,   def: 1, move: 1, range: 2, cost: 3, skills: ['dash'],                        label: 'Sniper'       },
+  defender: { hp: 15, atk: 1,   def: 3, move: 1, range: 1, cost: 3, skills: ['fortify'],                     label: 'Mech'         },
+  marauder: { hp: 15, atk: 3,   def: 3, move: 1, range: 1, cost: 5, skills: [],                              label: 'Marauder'     },
+  mortar:   { hp: 10, atk: 4,   def: 0, move: 1, range: 3, cost: 8, skills: ['stiff'],                       label: 'Mortar Drone' },
+  strider:  { hp: 10, atk: 3.5, def: 1, move: 3, range: 1, cost: 8, skills: ['dash', 'escape', 'persist'],   label: 'Strider'      },
+  empath:   { hp: 10, atk: 0,   def: 1, move: 1, range: 1, cost: 5, skills: [],                              label: 'Empath'       },
 };
+
+function hasSkill(type, skill) {
+  return UNIT_STATS[type].skills.includes(skill);
+}
 
 const PLAYER_COLORS = {
   0: { body: '#dc2626', dark: '#991b1b', label: 'Player 1', short: 'P1' }, // RED
@@ -1007,9 +1018,8 @@ function moveUnit(state, unit, toQ, toR) {
   unit.r = toR;
   unit.canMove = false;
   unit.hasMovedThisTurn = true;
-  // Warriors: moving consumes the action (no attack this turn).
-  // Riders: Dash — can still attack after moving.
-  if (!UNIT_STATS[unit.type].dash) unit.canAttack = false;
+  // Default: moving consumes the attack. Skill 'dash' keeps attack available.
+  if (!hasSkill(unit.type, 'dash')) unit.canAttack = false;
   return true;
 }
 
@@ -1025,31 +1035,45 @@ function attackUnit(state, attacker, defender) {
   const dist = hexDistance(attacker.q, attacker.r, defender.q, defender.r);
   if (dist > UNIT_STATS[attacker.type].range) return null;
   const defTile = state.tileAt(defender.q, defender.r);
-  const bonus = tileDefenseBonus(defTile);
+  // Terrain bonus, then Fortify multiplier. Fortify (Mech) — defender hasn't
+  // moved AND hasn't attacked this turn → ×1.5 multiplicative.
+  let bonus = tileDefenseBonus(defTile);
+  const defenderFortified =
+    hasSkill(defender.type, 'fortify') && !defender.hasMovedThisTurn && defender.canAttack;
+  if (defenderFortified) bonus *= 1.5;
   const { attackerDamage, defenderDamage } = resolveCombat(attacker, defender, bonus);
   defender.hp -= defenderDamage;
-  // Retaliation: defender must survive AND be able to reach attacker within
-  // its own range. Polytopia-faithful — melee can't reply to a ranged attack.
-  // Additional rules:
-  //   - 'stiff' attacker (Mortar Drone) suppresses ALL retaliation regardless
-  //     of distance — slow-firing artillery has no point-blank reaction shot.
-  //   - 0-atk defender (Empath) can't retaliate.
+  // Retaliation gating:
+  //   - attacker 'stiff' (Mortar) or 'surprise' (Dagger) suppresses entirely.
+  //   - defender atk==0 (Empath) can't retaliate.
+  //   - defender must reach attacker within its own range.
   const defenderCanReach = dist <= UNIT_STATS[defender.type].range;
-  const attackerHasStiff = UNIT_STATS[attacker.type].skill === 'stiff';
+  const attackerSuppresses =
+    hasSkill(attacker.type, 'stiff') || hasSkill(attacker.type, 'surprise');
   const defenderCanRetaliate =
-    !attackerHasStiff &&
+    !attackerSuppresses &&
     UNIT_STATS[defender.type].atk > 0 &&
     defenderCanReach;
   const retaliates = defender.hp > 0 && defenderCanRetaliate;
   if (retaliates) attacker.hp -= attackerDamage;
+  // Default: attacking consumes both actions. Skill 'escape' lets the unit
+  // move AFTER attacking. Skill 'persist' restores both on a kill (precedence
+  // over escape).
+  const defenderKilled = defender.hp <= 0;
   attacker.canAttack = false;
   attacker.canMove = false;
+  if (defenderKilled && hasSkill(attacker.type, 'persist') && attacker.hp > 0) {
+    attacker.canMove = true;
+    attacker.canAttack = true;
+  } else if (hasSkill(attacker.type, 'escape') && !attacker.hasMovedThisTurn) {
+    attacker.canMove = true;
+  }
   const events = [{
     attackerType: attacker.type,
     defenderType: defender.type,
     defenderDamage,
     attackerDamage: retaliates ? attackerDamage : 0,
-    defenderKilled: defender.hp <= 0,
+    defenderKilled,
     attackerKilled: retaliates && attacker.hp <= 0,
   }];
   state.units = state.units.filter(u => u.hp > 0);
@@ -1341,11 +1365,12 @@ function aiPredictTrade(state, att, def) {
   const raw = resolveCombat(att, def, bonus);
   const dist = hexDistance(att.q, att.r, def.q, def.r);
   const defenderCanReachAttacker = dist <= UNIT_STATS[def.type].range;
-  const attackerHasStiff = UNIT_STATS[att.type].skill === 'stiff';
+  const attackerSuppresses =
+    hasSkill(att.type, 'stiff') || hasSkill(att.type, 'surprise');
   const willKillDefender = def.hp - raw.defenderDamage <= 0;
   const retaliates =
     !willKillDefender &&
-    !attackerHasStiff &&
+    !attackerSuppresses &&
     UNIT_STATS[def.type].atk > 0 &&
     defenderCanReachAttacker;
   return {
